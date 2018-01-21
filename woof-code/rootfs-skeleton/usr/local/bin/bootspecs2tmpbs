@@ -1,0 +1,82 @@
+#!/bin/ash
+
+if [ "$1" = "-h" -o "$1" = "--help" ]; then
+	SHBASE="`basename $0`"
+	echo "If necessary, retrieve BOOT_SPECS and store in /tmp"
+	echo "Usage: $SHBASE [-h|-q]"
+	echo "Examples:"
+	echo " $SHBASE -q"
+	echo " $SHBASE"
+	echo "The \"-q\" parameter suppresses error messages."
+	exit 1
+fi
+
+[ "$1" = "-q" ] && exec 2>/dev/null
+
+CONF_FILE="$HOME/.config/boot_specs.conf"
+[ -f "$CONF_FILE" ] && . "$CONF_FILE"
+if [ "$TMP_FN" = "" ]; then
+	TMP_FN='/tmp/BOOT_SPECS'
+	[ -f "$TMP_FN" ] && rm "$TMP_FN"
+elif [ -f "$TMP_FN" ]; then
+	if [ "$IN_INITRD" -o "$WAS_MOUNTED" ]; then
+		[ "$1" = "-q" ] || echo "File \"$TMP_FN\" already exists."
+		exit 1
+	else
+		rm "$TMP_FN"
+	fi
+fi
+
+MOD_FLAG="${TMP_FN}.modified.flag"
+[ -f "$MOD_FLAG" ] && rm "$MOD_FLAG"
+
+echo "TMP_FN='$TMP_FN'" > "$CONF_FILE"
+echo "MOD_FLAG='$MOD_FLAG'" >> "$CONF_FILE"
+
+. /etc/rc.d/PUPSTATE
+
+WAS_MOUNTED=''
+SFS_PART="${PUPSFS%%,*}"
+SPART_MP="$(grep -m1 "^/dev/$SFS_PART" /proc/mounts)"
+if [ "$SPART_MP" ]; then
+	SPART_MP="${SPART_MP#* }"; SPART_MP="${SPART_MP%% *}"
+else
+	SPART_TYPE="${PUPSFS#*,}"; SPART_TYPE="${SPART_TYPE%,*}"
+	if [ "$SPART_TYPE" ]; then
+		SPART_MP="/mnt/$SFS_PART"
+		[ -d "$SPART_MP" ] || mkdir -p $SPART_MP
+		mount -t $SPART_TYPE -o noatime /dev/$SFS_PART $SPART_MP
+		if [ $? -eq 0 ]; then
+			WAS_MOUNTED='yes'
+		else
+			SPART_MP=''
+		fi
+	fi
+fi
+[ "$SPART_MP" ] || exit 1
+
+SFS_REL="${PUPSFS##*,}"; SFS_REL="${SFS_REL%/*}"
+
+IN_INITRD=''
+DS_FN="${TMP_FN}.ds.txt"
+initrd2file /DISTRO_SPECS "${SPART_MP}${SFS_REL}/initrd.gz" "$DS_FN"  > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+	initrd2file /BOOT_SPECS "${SPART_MP}${SFS_REL}/initrd.gz" "$TMP_FN" > /dev/null 2>&1
+	IN_INITRD='yes'
+	SPECS_FN="$TMP_FN"
+elif [ "$WAS_MOUNTED" ]; then
+	[ -f "${SPART_MP}${SFS_REL}/BOOT_SPECS" ] && cp -af "${SPART_MP}${SFS_REL}/BOOT_SPECS" "$TMP_FN"
+	SPECS_FN="$TMP_FN"	
+else
+	SPECS_FN="${SPART_MP}${SFS_REL}/BOOT_SPECS"
+fi
+[ -f "$DS_FN" ] && rm "$DS_FN"
+[ -f "$SPECS_FN" ] || touch "$SPECS_FN"
+
+echo "IN_INITRD='$IN_INITRD'" >> "$CONF_FILE"
+echo "WAS_MOUNTED='$WAS_MOUNTED'" >> "$CONF_FILE"
+echo "SPECS_FN='$SPECS_FN'" >> "$CONF_FILE"
+
+[ "$WAS_MOUNTED" ] && umount "$SPART_MP"
+
+exit

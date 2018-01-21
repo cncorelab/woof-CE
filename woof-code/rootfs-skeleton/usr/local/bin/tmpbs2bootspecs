@@ -1,0 +1,66 @@
+#!/bin/ash
+
+if [ "$1" = "-h" -o "$1" = "--help" ]; then
+	SHBASE="`basename $0`"
+	echo "If necessary, store BOOT_SPECS from /tmp to it's location"
+	echo "Usage: $SHBASE [-h|-q]"
+	echo "Examples:"
+	echo " $SHBASE -q"
+	echo " $SHBASE"
+	echo "The \"-q\" parameter suppresses error messages."
+	exit 1
+fi
+
+[ "$1" = "-q" ] && exec 2>/dev/null
+
+CONF_FILE="$HOME/.config/boot_specs.conf"
+if [ ! -f "$CONF_FILE" ]; then
+	[ "$1" = "-q" ] || echo "File \"${CONF_FILE}\" not found."
+	exit 1
+fi
+. "$CONF_FILE"
+[ "$IN_INITRD" ] || [ "$WAS_MOUNTED" ] || exit 0 #nothing to do
+
+if [ ! -f "$SPECS_FN" ]; then
+	[ "$1" = "-q" ] || echo "File \"${SPECS_FN}\" not found."
+	exit 1
+fi
+if [ ! -f "$MOD_FLAG" ]; then
+	[ "$1" = "-q" ] || echo "File \"${SPECS_FN}\" not modified."
+	exit 1
+fi
+
+. /etc/rc.d/PUPSTATE
+
+SPART_MTD=''
+SFS_PART="${PUPSFS%%,*}"
+SPART_MP="$(grep -m1 "^/dev/$SFS_PART" /proc/mounts)"
+if [ "$SPART_MP" ]; then
+	SPART_MP="${SPART_MP#* }"; SPART_MP="${SPART_MP%% *}"
+else
+	SPART_TYPE="${PUPSFS#*,}"; SPART_TYPE="${SPART_TYPE%,*}"
+	if [ "$SPART_TYPE" ]; then
+		SPART_MP="/mnt/$SFS_PART"
+		[ -d "$SPART_MP" ] || mkdir -p $SPART_MP
+		mount -t $SPART_TYPE -o noatime /dev/$SFS_PART $SPART_MP
+		if [ $? -eq 0 ]; then
+			SPART_MTD='yes'
+		else
+			SPART_MP=''
+		fi
+	fi
+fi
+[ "$SPART_MP" ] || exit 1
+
+SFS_REL="${PUPSFS##*,}"; SFS_REL="${SFS_REL%/*}"
+
+if [ "$IN_INITRD" = 'yes' ]; then
+	file2initrd "$SPECS_FN" "${SPART_MP}${SFS_REL}/initrd.gz" /BOOT_SPECS > /dev/null 2>&1
+else
+	cp -af "$SPECS_FN" "${SPART_MP}${SFS_REL}/BOOT_SPECS"
+fi
+rm "$SPECS_FN"
+
+[ "$SPART_MTD" ] && umount "$SPART_MP"
+
+exit

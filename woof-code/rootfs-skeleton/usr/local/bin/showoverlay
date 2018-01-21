@@ -1,0 +1,32 @@
+#!/bin/ash
+
+MOUNTS_FILE='/proc/mounts'
+
+decode_overlay_line() {
+	CUR_OV="${1#*lowerdir=}"; CUR_OV="${CUR_OV%%,*}"; CUR_OV="${CUR_OV%% *}"
+	for ONE_DIR in ${CUR_OV//:/ };do
+		NX_OV="$(grep "overlay /initrd$ONE_DIR " $MOUNTS_FILE)"
+		if [ "$NX_OV" ];then
+			decode_overlay_line "$NX_OV"
+		else
+			DIR_LIST="${DIR_LIST}${ONE_DIR}:"
+		fi
+	done
+}
+
+NX_OV="$(grep "overlay / " $MOUNTS_FILE)"
+UP_DIR="${NX_OV#*upperdir=}"; UP_DIR="${UP_DIR%%,*}"
+DIR_LIST="${UP_DIR}:"
+decode_overlay_line "$NX_OV"
+for ONE_DIR in ${DIR_LIST//:/ };do
+	LOP="$(grep "^/dev/loop" $MOUNTS_FILE | grep "$ONE_DIR")"
+	if [ "$LOP" ];then
+		LOP="${LOP%% *}"
+		CUR_DIR="$(losetup "$LOP")"; CUR_DIR="${CUR_DIR##* }"
+	else
+		CUR_DIR="/initrd$ONE_DIR"
+	fi
+	echo "$CUR_DIR"
+done
+
+exit

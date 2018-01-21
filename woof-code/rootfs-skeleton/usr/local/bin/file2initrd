@@ -1,0 +1,65 @@
+#!/bin/bash
+
+if [ $# -lt 3 ]; then
+	SHBASE="`basename $0`"
+	echo "Usage: $SHBASE  filename into-intitrd-filename as-filename"
+	echo "Examples:"
+	echo " $SHBASE /root/my-init-script /mnt/home/my-initrd.gz /init"
+	echo " $SHBASE BOOTCONFIG initrd.gz /etc/rc.d/BOOTCONFIG"
+	exit 1
+fi
+
+if [ -f "$1" ]; then
+	FLNAME="`cd \`dirname $1\`; pwd`/`basename $1`"
+else
+	echo "File '$1' not found"
+	exit 1
+fi
+
+if [ "${2##*.}" != "gz" ]; then
+	echo "initrd file '$2' does not end in '.gz'"
+	exit 1
+fi
+
+GZBASE="${2##*/}"
+if [ -f "$2" ]; then
+	GZNAME="$(cd $(dirname $2); pwd)/$GZBASE"
+else
+	echo "initrd file '$2' not found"
+	exit 1
+fi
+
+if [ "${3:0:1}" != "/" ]; then
+	echo "File '$3' does not begin with '/'"
+	exit 1
+fi
+
+cp -a -f "$GZNAME" /tmp
+[ -f /tmp/initrd ] && rm -f /tmp/initrd
+cd /tmp
+FNBASE="${GZBASE%.*}"
+gunzip "$GZBASE"
+if [ $? -ne 0 ];then
+	[ -f "$FNBASE" ] && rm -f "$FNBASE"
+	[ -f "$GZBASE" ] && rm -f "$GZBASE"
+	echo "Unzip of '$GZNAME' failed"
+	exit 1
+fi
+
+ASNAME="/tmp/initrd-tree${3}"
+[ -d initrd-tree ] && rm -r -f initrd-tree
+mkdir initrd-tree
+cd initrd-tree
+cat ../"$FNBASE" | cpio -i -m -d
+cp -a -f "$FLNAME" "$ASNAME"
+sync
+rm -f ../"$FNBASE"
+find . | cpio -o -H newc | gzip -9 > ../"$GZBASE"
+cd ..
+cp -a -f "$GZBASE" "$GZNAME"
+
+sync
+rm -f "$GZBASE"
+rm -r -f initrd-tree
+
+exit 0
