@@ -1,4 +1,11 @@
 #!/bin/sh
+
+. /etc/rc.d/PUPSTATE
+
+if [ "$PUNIONFS" = "overlay" ] ; then
+	exec /opt/extra_sfs/extra_sfs
+fi
+
 # sfs_load 28 Jan 2011 by shinobar
 # always assume squashfs 4.0
 # some code from the otf_sfs_loader by goingnuts, the sfs_installation.sh by 01micko and scrips by Barry
