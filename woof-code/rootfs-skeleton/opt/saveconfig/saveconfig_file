@@ -1,0 +1,207 @@
+#!/bin/ash
+
+error_exit() {
+	if [ "$1" ]; then
+		$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
+			--text "$1" \
+			--button=gtk-ok:0
+	fi
+	[ -f "$TMP_LIST" ] && rm "$TMP_LIST"
+	[ "$LOOP_MOUNT" ] && umount "$LOOP_MOUNT"
+	[ "$PART_MOUNT" ] && umount "$PART_MOUNT"
+	exit 1
+}
+
+EXE_DIR="$(dirname $(readlink -f ${0}))"
+
+if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
+	YAD_EXE='yad64'
+else
+	YAD_EXE='yad32'
+fi
+
+ICON_FILE='/usr/share/pixmaps/puppy/floppy.svg'
+OPEN_ICON="$EXE_DIR/icons/open.png"
+NEW_ICON="$EXE_DIR/icons/new.png"
+
+PART_MOUNT=''
+LOOP_MOUNT=''
+
+TMP_LIST='/tmp/save_config_tmp_list.txt'
+[ -f "$TMP_LIST" ] && rm "$TMP_LIST"
+
+$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
+	--text "No Linux partitions were found. You can:
+<span foreground='blue'>Cancel</span>
+And then provide a real Linux partition to contain the Puppy save folder.
+<span foreground='blue'>Create</span>
+A new Linux partition file on one of your writable partitions.
+This file will be created and then formated with a Linux file system.
+The new Puppy save folder will be created within it.
+Init will mount this file as though it were a Linux partition.
+<span foreground='blue'>Select</span>
+An existing Linux partition file to contain the new Puppy save folder." \
+	--button=gtk-cancel:1 --button=Create!${NEW_ICON}:2 --button=Select!${OPEN_ICON}:4
+STATUS=$?
+case $STATUS in
+	1) exit 1 ;;
+	2) MODE='new' ;;
+	4) MODE='sel' ;;
+esac
+
+PARTS_DIR="/tmp/disk/other"
+PARTS_LIST="$(ls -1 $PARTS_DIR/)"
+if [ "$PARTS_LIST" ];then
+	for ONE_PART in $PARTS_LIST; do
+		read ONE_LINE < "$PARTS_DIR/$ONE_PART"
+		ONE_TYPE="${ONE_LINE#*:}"
+		ONE_ID="${ONE_LINE%:*}"
+		ONE_LABEL="${ONE_ID#*,}"
+		ONE_ID="${ONE_ID%,*}"
+		echo "$ONE_PART" >> "$TMP_LIST"
+		echo "$ONE_TYPE" >> "$TMP_LIST"
+		echo "$ONE_LABEL" >> "$TMP_LIST"
+		echo "$ONE_ID" >> "$TMP_LIST"
+	done
+	PART_SPEC="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --width=270 --height=200 --title "Saveconfig" --buttons-layout=center \
+		--text "Select a partition:" \
+		--list --column=Part --column=Type --column=Label --column=UUID:HD < $TMP_LIST \
+		--button=gtk-cancel:1 --button=gtk-ok:0)"
+	[ $? -eq 1 ] &&  error_exit
+	rm "$TMP_LIST"
+fi
+[ "$PART_SPEC" ] || error_exit "No partition selected."
+PART_SPEC="${PART_SPEC%|}"
+PART_NAME="${PART_SPEC%%|*}"
+
+PART_MP="$(grep -m1 "^/dev/$PART_NAME" /proc/mounts)"
+if [ "$PART_MP" ]; then
+	PART_MP="${PART_MP#* }"; PART_MP="${PART_MP%% *}"
+else
+	PART_FS="${PART_SPEC#*|}"; PART_FS="${PART_FS%%|*}"
+	if [ "$PART_FS" ]; then
+		PART_MP="/mnt/$PART_NAME"
+		[ -d "$PART_MP" ] || mkdir -p $PART_MP
+		mount -t $PART_FS -o noatime /dev/$PART_NAME $PART_MP
+		if [ $? -eq 0 ]; then
+			PART_MOUNT="$PART_MP"
+		else
+			PART_MP=''
+		fi
+	fi
+fi
+[ "$PART_MP" ] || error_exit "\"$PART_NAME\" could not be mounted."
+
+PART_ID=''
+#try to use LABEL to specify partition in PART_ID
+LABEL="${PART_SPEC#*|*|}"; LABEL="${LABEL%|*}"
+if [ "$LABEL" ]; then
+	PART_ID="$LABEL"
+else
+	#else use UUID
+	UUID="${PART_SPEC##*|}"
+	[ "$UUID" ] && PART_ID="$UUID"
+fi
+[ "$PART_ID" ] || PART_ID="$PART_NAME"
+
+FILE_NM='linuxFS.4fs'
+
+if [ "$MODE" = "new" ]; then
+	PART_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"$FILE_NM\"." \
+		--file --directory --width=600 --height=400 \
+		--filename="$PART_MP/")"
+	[ "$PART_DIR" ] || error_exit "No directory selected."
+	LOOP_FILE="$PART_DIR/$FILE_NM"
+	/usr/lib/gtkdialog/box_splash -text "Creating Linux pseudo-partition file $FILE_NM" &
+	XPID=$!
+	[ "$PMINAVAIL" ] || PMINAVAIL=131072 # 128MiB
+	dd if=/dev/zero of="$LOOP_FILE" bs=1k count=$PMINAVAIL 2> /dev/null
+	if [ $? -eq 0 ]; then
+		sync
+		mkfs.ext4 -q -m 0 -F "$LOOP_FILE"
+		if [ $? -ne 0 ]; then
+			[ -f "$LOOP_FILE" ] && rm "$LOOP_FILE"
+			kill $XPID
+			error_exit "\"$LOOP_FILE\" could not be formated as \"ext4\"."
+		fi
+	else
+		[ -f "$LOOP_FILE" ] && rm "$LOOP_FILE"
+		kill $XPID
+		error_exit "Writing \"$LOOP_FILE\" failed."
+	fi
+	kill $XPID
+elif [ "$MODE" = "sel" ]; then
+	LOOP_FILE="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select Linux partition file." \
+		--file --width=600 --height=400 \
+		--filename="$PART_MP")"
+fi
+[ "$LOOP_FILE" ] || error_exit "No Linux partition file selected."
+[ -f "$LOOP_FILE" ] || error_exit "No Linux partition file selected."
+
+LOOP_FS=''
+case ${LOOP_FILE##*.} in
+	2fs) LOOP_FS='ext2' ;;
+	3fs) LOOP_FS='ext3' ;;
+	4fs) LOOP_FS='ext4' ;;
+	*) error_exit "\"$LOOP_FILE\" is not a Linux partition file." ;;
+esac
+
+LOOP_MP=''
+LOOP_DEV="$(losetup -a | grep $LOOP_FILE)"
+if [ "$LOOP_DEV" ];then
+	LOOP_DEV="${LOOP_DEV%%:*}"
+	[ -L "$LOOP_DEV" ] && LOOP_DEV="$(readlink -f "$LOOP_DEV")"
+	LOOP_MP="$(grep -m1 "^$LOOP_DEV" /proc/mounts)"
+	[ "$LOOP_MP" ] && { LOOP_MP="${LOOP_MP#* }"; LOOP_MP="${LOOP_MP%% *}"; }
+else
+	LOOP_DEV="$(losetup -f)"
+	if [ "$LOOP_DEV" ]; then
+		losetup $LOOP_DEV "$LOOP_FILE" > /dev/null
+		if [ $? -eq 0 ]; then
+			LOOP_MP="/mnt/${LOOP_DEV#/dev/}"
+			[ -d "$LOOP_MP" ] || mkdir -p $LOOP_MP
+			mount -t $LOOP_FS -o noatime $LOOP_DEV $LOOP_MP
+			if [ $? -eq 0 ]; then
+				LOOP_MOUNT="$LOOP_MP"
+			else
+				losetup -d $LOOP_DEV
+				LOOP_MP=''
+			fi
+		fi
+	fi 
+fi
+[ "$LOOP_MP" ] || error_exit "Failed to mount \"$LOOP_FILE\""
+
+PS_SAVE_PART="${PART_NAME}:${LOOP_FILE#${PART_MP}}"
+BS_SAVE_PART="${PART_ID}:${LOOP_FILE#${PART_MP}}" #for BOOT_SPECS
+
+. /etc/DISTRO_SPECS
+
+LOOP_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"${DISTRO_FILE_PREFIX}save\"." \
+	--file --directory --width=600 --height=400 \
+	--text " \"$PS_SAVE_PART\" is mounted on \"$LOOP_MP\"" \
+	--filename="$LOOP_MP/")"
+[ "$LOOP_DIR" ] || error_exit "No directory selected"
+
+BS_SAVE_DIR="${LOOP_DIR#${LOOP_MP}}"
+[ "$BS_SAVE_DIR" ] || BS_SAVE_DIR='/' #for BOOT_SPECS
+
+$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - confirm" --buttons-layout=center \
+	--text="Use directory <span foreground='blue'><big>$BS_SAVE_DIR</big></span> inside <span foreground='blue'><big>$PS_SAVE_PART</big></span>
+to contain savefolder \"${DISTRO_FILE_PREFIX}save\"?" \
+	--button=gtk-no:1 --button=gtk-yes:0
+[ $? -eq 0 ] || error_exit
+
+#"$EXE_DIR/saveconfig_rosave"
+
+[ -d "$LOOP_DIR/${DISTRO_FILE_PREFIX}save" ] || mkdir -p "$LOOP_DIR/${DISTRO_FILE_PREFIX}save"
+[ -d "$LOOP_DIR/${DISTRO_FILE_PREFIX}work" ] || mkdir -p "$LOOP_DIR/${DISTRO_FILE_PREFIX}work"
+
+variable2tmpbs P_SAVE_PART "$BS_SAVE_PART"
+variable2tmpbs P_SAVE_DIR "$BS_SAVE_DIR"
+variable2tmpbs PMODE "12"
+
+[ "$LOOP_MOUNT" ] && umount "$LOOP_MOUNT"
+[ "$PART_MOUNT" ] && umount "$PART_MOUNT"
+
+exit

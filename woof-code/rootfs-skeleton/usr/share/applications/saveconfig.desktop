@@ -1,0 +1,10 @@
+[Desktop Entry]
+Encoding=UTF-8
+Name=Saveconfig - configure save layer
+Icon=/usr/share/pixmaps/puppy/floppy.svg
+Comment=Configure save layer
+Exec=/opt/saveconfig/saveconfig
+Terminal=false
+Type=Application
+Categories=X-SetupEntry;PackageManager
+GenericName=Extra SFS file manager
