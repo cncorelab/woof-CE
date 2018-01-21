@@ -5,6 +5,11 @@
 # _MP = _MOUNTPOINT
 #
 
+. /DISTRO_SPECS
+if [ "$DISTRO_UNIONFS" = "overlay" ] ; then
+	exec /init.overlay
+fi
+
 #Aufs layers setup by this script...
 #aufs layers:            RW (top)      RO1             RO2              PUPMODE
 #First boot (or pfix=ram):  tmpfs                         pup_xxx.sfs      5
@@ -76,7 +81,6 @@ export LANG=C
 PATH="/bin:/sbin"
 export KERNELVER="$(uname -r)"
 VFAT_OUT_PARAM='shortname=mixed,quiet,utf8' #see also /sbin/set_plang
-. /DISTRO_SPECS #v412 has DISTRO_VERSION, DISTRO_FILE_PREFIX
 . /etc/rc.d/functions_x
 
 #precaution - if DISTRO_SPECS was not processed by 3builddistro...
