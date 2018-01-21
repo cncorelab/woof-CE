@@ -31,12 +31,6 @@ get_part_info() {
 
 EXE_DIR="$(dirname $(readlink -f ${0}))"
 
-if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
-	YAD_EXE='yad64'
-else
-	YAD_EXE='yad32'
-fi
-
 [ -d /tmp/disk/linux ] || get_part_info
 
 PARTS_DIR="/tmp/disk"
@@ -48,7 +42,7 @@ else
 	ICON_FILE='/usr/share/pixmaps/puppy/floppy.svg'
 	OTHER_ICON="$EXE_DIR/icons/other.png"
 	LINUX_ICON="$EXE_DIR/icons/linux.png"
-	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
+	yad --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
 		--text "This dialog is currently provided for testing purposes.
 
 Both Linux and non-Linux partitions were found. You can:

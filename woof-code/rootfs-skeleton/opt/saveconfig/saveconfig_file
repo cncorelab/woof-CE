@@ -2,7 +2,7 @@
 
 error_exit() {
 	if [ "$1" ]; then
-		$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
+		yad --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
 			--text "$1" \
 			--button=gtk-ok:0
 	fi
@@ -14,12 +14,6 @@ error_exit() {
 
 EXE_DIR="$(dirname $(readlink -f ${0}))"
 
-if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
-	YAD_EXE='yad64'
-else
-	YAD_EXE='yad32'
-fi
-
 ICON_FILE='/usr/share/pixmaps/puppy/floppy.svg'
 OPEN_ICON="$EXE_DIR/icons/open.png"
 NEW_ICON="$EXE_DIR/icons/new.png"
@@ -30,7 +24,7 @@ LOOP_MOUNT=''
 TMP_LIST='/tmp/save_config_tmp_list.txt'
 [ -f "$TMP_LIST" ] && rm "$TMP_LIST"
 
-$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
+yad --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
 	--text "No Linux partitions were found. You can:
 <span foreground='blue'>Cancel</span>
 And then provide a real Linux partition to contain the Puppy save folder.
@@ -63,7 +57,7 @@ if [ "$PARTS_LIST" ];then
 		echo "$ONE_LABEL" >> "$TMP_LIST"
 		echo "$ONE_ID" >> "$TMP_LIST"
 	done
-	PART_SPEC="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --width=270 --height=200 --title "Saveconfig" --buttons-layout=center \
+	PART_SPEC="$(yad --window-icon="$ICON_FILE" --center --borders=6 --width=270 --height=200 --title "Saveconfig" --buttons-layout=center \
 		--text "Select a partition:" \
 		--list --column=Part --column=Type --column=Label --column=UUID:HD < $TMP_LIST \
 		--button=gtk-cancel:1 --button=gtk-ok:0)"
@@ -107,7 +101,7 @@ fi
 FILE_NM='linuxFS.4fs'
 
 if [ "$MODE" = "new" ]; then
-	PART_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"$FILE_NM\"." \
+	PART_DIR="$(yad --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"$FILE_NM\"." \
 		--file --directory --width=600 --height=400 \
 		--filename="$PART_MP/")"
 	[ "$PART_DIR" ] || error_exit "No directory selected."
@@ -131,7 +125,7 @@ if [ "$MODE" = "new" ]; then
 	fi
 	kill $XPID
 elif [ "$MODE" = "sel" ]; then
-	LOOP_FILE="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select Linux partition file." \
+	LOOP_FILE="$(yad --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select Linux partition file." \
 		--file --width=600 --height=400 \
 		--filename="$PART_MP")"
 fi
@@ -177,7 +171,7 @@ BS_SAVE_PART="${PART_ID}:${LOOP_FILE#${PART_MP}}" #for BOOT_SPECS
 
 . /etc/DISTRO_SPECS
 
-LOOP_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"${DISTRO_FILE_PREFIX}save\"." \
+LOOP_DIR="$(yad --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"${DISTRO_FILE_PREFIX}save\"." \
 	--file --directory --width=600 --height=400 \
 	--text " \"$PS_SAVE_PART\" is mounted on \"$LOOP_MP\"" \
 	--filename="$LOOP_MP/")"
@@ -186,7 +180,7 @@ LOOP_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Sa
 BS_SAVE_DIR="${LOOP_DIR#${LOOP_MP}}"
 [ "$BS_SAVE_DIR" ] || BS_SAVE_DIR='/' #for BOOT_SPECS
 
-$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - confirm" --buttons-layout=center \
+yad --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - confirm" --buttons-layout=center \
 	--text="Use directory <span foreground='blue'><big>$BS_SAVE_DIR</big></span> inside <span foreground='blue'><big>$PS_SAVE_PART</big></span>
 to contain savefolder \"${DISTRO_FILE_PREFIX}save\"?" \
 	--button=gtk-no:1 --button=gtk-yes:0

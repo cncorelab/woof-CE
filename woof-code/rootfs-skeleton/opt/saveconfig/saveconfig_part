@@ -2,7 +2,7 @@
 
 error_exit() {
 	if [ "$1" ]; then
-		$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
+		yad --window-icon="$ICON_FILE" --center --borders=6 --height=80 --title "Saveconfig" --buttons-layout=center \
 			--text "$1" \
 			--button=gtk-ok:0
 	fi
@@ -13,12 +13,6 @@ error_exit() {
 }
 
 EXE_DIR="$(dirname $(readlink -f ${0}))"
-
-if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
-	YAD_EXE='yad64'
-else
-	YAD_EXE='yad32'
-fi
 
 ICON_FILE='/usr/share/pixmaps/puppy/floppy.svg'
 OPEN_ICON="$EXE_DIR/icons/open.png"
@@ -47,7 +41,7 @@ if [ "$PARTS_LIST" ];then
 		echo "$ONE_LABEL" >> "$TMP_LIST"
 		echo "$ONE_ID" >> "$TMP_LIST"
 	done
-	PART_SPEC="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --width=270 --height=200 --title "Saveconfig" --buttons-layout=center \
+	PART_SPEC="$(yad --window-icon="$ICON_FILE" --center --borders=6 --width=270 --height=200 --title "Saveconfig" --buttons-layout=center \
 		--text "Select a partition:" \
 		--list --column=Part --column=Type --column=Label --column=UUID:HD < $TMP_LIST \
 		--button=gtk-cancel:1 --button=gtk-ok:0)"
@@ -62,7 +56,7 @@ PART_FS="${PART_SPEC#*|}"; PART_FS="${PART_FS%%|*}"
 if [ "$PART_FS" = "crypto_LUKS" ]; then
 	if [ ! -e "/dev/mapper/$PART_NAME" ]; then
 		[ "$(which cryptsetup)" ] || error_exit "\"cryptsetup\" utility not found."
-		MYPASS="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - password" --buttons-layout=center \
+		MYPASS="$(yad --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - password" --buttons-layout=center \
 		--text="Enter the password for ${PART_NAME}:" \
 		--entry --hide-text)"
 		[ "$MYPASS" ] || error_exit
@@ -112,7 +106,7 @@ BS_SAVE_PART="${PART_ID}" #for BOOT_SPECS
 
 . /etc/DISTRO_SPECS
 
-PART_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"${DISTRO_FILE_PREFIX}save\"." \
+PART_DIR="$(yad --window-icon="$ICON_FILE" --center --borders=6 --title "Saveconfig - Select a directory to contain \"${DISTRO_FILE_PREFIX}save\"." \
 	--file --directory --width=600 --height=400 \
 	--text " \"$PART_NAME\" is mounted on \"$PART_MP\"" \
 	--filename="$PART_MP/")"
@@ -121,7 +115,7 @@ PART_DIR="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "Sa
 BS_SAVE_DIR="${PART_DIR#${PART_MP}}"
 [ "$BS_SAVE_DIR" ] || BS_SAVE_DIR='/' #for BOOT_SPECS
 
-$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - confirm" --buttons-layout=center \
+yad --window-icon="$ICON_FILE" --center --borders=6 --title="Saveconfig - confirm" --buttons-layout=center \
 	--text="Use directory <span foreground='blue'><big>$BS_SAVE_DIR</big></span> inside <span foreground='blue'><big>$PART_NAME</big></span>
 to contain savefolder \"${DISTRO_FILE_PREFIX}save\"?" \
 	--button=gtk-no:1 --button=gtk-yes:0

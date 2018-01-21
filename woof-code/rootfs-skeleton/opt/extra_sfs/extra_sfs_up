@@ -1,13 +1,13 @@
 #!/bin/ash
 
 info_exit() {
-	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$INFO_ICON" --button=gtk-ok:0 \
+	yad --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$INFO_ICON" --button=gtk-ok:0 \
 		--text "$1"
 	exec "$EXE_DIR/extra_sfs_main"
 }
 
 error_exit() {
-	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$ERR_ICON" --button=gtk-ok:1 \
+	yad --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$ERR_ICON" --button=gtk-ok:1 \
 		--text "$1"
 	exec "$EXE_DIR/extra_sfs_main"
 }
@@ -15,12 +15,6 @@ error_exit() {
 EXE_DIR="$(dirname $(readlink -f ${0}))"
 [ -f "$EXE_DIR/extra_sfs_common" ] && . "$EXE_DIR/extra_sfs_common"
 [ -f "$CONF_FILE" ] && . "$CONF_FILE"
-
-if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
-	YAD_EXE='yad64'
-else
-	YAD_EXE='yad32'
-fi
 
 SFS_BN="$1"
 [ "$SFS_BN" ] || info_exit "No extra sfs file was selected."
