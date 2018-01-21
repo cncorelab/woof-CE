@@ -325,8 +325,10 @@ case $PUPMODE in
  77) multisavefunc ;; #save to folder on multisession CD/DVD (including 1st shutdown). (13+64=77)
  2)  echo -n ;; #echo "$(printf "$(gettext '%s mounted directly, session already saved.')" "$PDEV1")" >/dev/console
  6)  echo "$(printf "$(gettext '%s mounted directly top layer, session already saved.')" "$PDEV1")" >/dev/console ;;
- 12) echo "$(printf "$(gettext '%s mounted directly top layer, session already saved.')" "${SAVEFILE##*/}")" >/dev/console ;;
-
+ 12) echo "$(printf "$(gettext '%s mounted directly top layer, session already saved.')" "${SAVEFILE##*/}")" >/dev/console
+  #if BOOT_SPECS in /tmp, update real BOOT_SPECS
+  [ "$(which tmpbs2bootspecs)" ] && tmpbs2bootspecs -q
+  ;;
  7) #PDEV1 and PUPSFS.
   asktosave_func
   if [ $? -eq 0 ]; then 
@@ -342,6 +344,41 @@ case $PUPMODE in
     echo "$(printf "$(gettext 'Saving session to %s (%s)...')" "${SAVEFILE}" "${SAVEPART}")" >/dev/console
     /usr/sbin/snapmergepuppy /initrd/pup_ro1 /initrd/pup_rw
   fi 
+  ;;
+ 21)
+  SP_MNTPT=''; SP_MOUNTED=''
+  if [ "$PNOSAVE" != "yes" ];then
+   SP_PART="${PUPSFS%%,*}"
+   SP_REL="${PUPSFS##*,}"; SP_REL="${SP_REL%/*}"
+   SP_TYPE="${PUPSFS%,*}"; SP_TYPE="${SP_TYPE#*,}"
+   SP_MNTPT="$(grep "^/dev/$SP_PART" /proc/mounts)"
+   if [ "$SP_MNTPT" ];then
+    SP_MNTPT="${SP_MNTPT#* }"; SP_MNTPT="${SP_MNTPT%% *}"
+   else
+    SP_MNTPT="/mnt/$SP_PART"
+    [ -d "$SP_MNTPT" ] || mkdir -p $SP_MNTPT
+    mount -t "$SP_TYPE" -o noatime "/dev/$SP_PART" "$SP_MNTPT"
+    if [ $? -eq 0 ];then
+     SP_MOUNTED="$SP_MNTPT"
+    else
+     SP_MNTPT=''
+    fi
+   fi
+   if [ "$SP_MNTPT" ];then
+    echo "$(printf "$(gettext 'Saving session to %s (%s)...')" "${SP_REL}/${DISTRO_FILE_PREFIX}save.ram.tar" "${SP_PART}")" >/dev/console
+    [ -d "${SP_MNTPT}${SP_REL}" ] || mkdir -p "${SP_MNTPT}${SP_REL}"
+    SP_OFN="${SP_MNTPT}${SP_REL}/${DISTRO_FILE_PREFIX}save.ram.tar"
+    SP_IFN="$(readlink -f /initrd/pup_rw)"
+    tar cf "$SP_OFN" -C "$SP_IFN" . 2>/dev/null
+#    tar cf "$SP_OFN" -C "$SP_IFN" --exclude='./initrd' --exclude='./dev' --exclude='./mnt' --exclude='./tmp' --exclude='./sys' . 2>/dev/null
+   fi
+   #if BOOT_SPECS in /tmp, update real BOOT_SPECS
+   [ "$(which tmpbs2bootspecs)" ] && tmpbs2bootspecs -q
+   [ "$SP_MOUNTED" ] && umount "$SP_MOUNTED"
+   sync
+  fi
+  [ "$SP_MNTPT" ] || echo "$(gettext "Session not saved")" >/dev/console
+  sync
   ;;
  *)
   echo "$(gettext "Session not saved")" >/dev/console
@@ -379,6 +416,8 @@ for MOUNT_POINT in $STRAY_MOUNTPOINTS ; do
 done
 sync
 
+echo "$(gettext "Unmounting puppy partition(s).")" >/dev/console
+
 #note, there is a problem with unmounting, especially ntfs as it cannot be remounted
 #ro (?). A ntfs part with ${DISTRO_FILE_PREFIX}save.2fs cannot be unmounted because of the mounted
 #${DISTRO_FILE_PREFIX}save.2fs.
@@ -406,14 +445,20 @@ if [ "`busybox mount | grep "$ABSPUPHOME"`" != "" ];then
  killzombies
 fi
 
+if [ "$PUNIONFS" = "overlay" ];then
+ busybox mount -no remount,ro /
+ [ $? -eq 0 ] || { echo "Error - waiting" > /dev/console; sleep 15; }
+fi
+
 #v2.16rc try this too... SAVE_LAYER defined in /etc/rc.d/PUPSTATE...
 if [ "$SAVE_LAYER" ];then
  sync
- SAVEDEV=`grep "/initrd${SAVE_LAYER}" /proc/mounts | cut -f 1 -d ' '`
- SAVEFS=`grep "/initrd${SAVE_LAYER}" /proc/mounts | cut -f 3 -d ' '`
+ SAVEMP="/initrd${SAVE_LAYER}"
+ [ -L "$SAVEMP" ] && SAVEMP="$(stat -Lc %m $SAVEMP)"
+ SAVEDEV=`grep "$SAVEMP" /proc/mounts | cut -f 1 -d ' '`
  #100615 Patriot: suggested this code to enable save-layer to remount ro...
  uniFS=$(awk '/unionfs/ {print $3}' /proc/mounts) #gets fstype, ex: aufs
- if [ "$uniFS" == "aufs" -a "$SAVE_LAYER" == "/pup_rw" ]; then
+ if [ "$uniFS" == "aufs" -a "$SAVE_LAYER" == "/pup_rw" ];then
   #i think only work if prepended dir is a separate f.s...
   if [ "`mount | grep '^tmpfs on /tmp '`" != "" ];then #created by /init in initrd.gz
    mkdir -p /tmp/unrootfs
@@ -421,11 +466,9 @@ if [ "$SAVE_LAYER" ];then
    sync
   fi
  fi
- if [ $SAVEDEV ]; then
-  busybox mount -t $SAVEFS -o remount,ro $SAVEDEV /initrd${SAVE_LAYER} 2>/dev/null
-  umount-FULL -i -n -l /initrd${SAVE_LAYER} 2>/dev/null #-l is lazy unmount.
- else
-  [ -L /initrd${SAVE_LAYER} ] && rm /initrd${SAVE_LAYER}
+ if [ "$SAVEDEV" ];then
+  busybox mount -no remount,ro "$SAVEMP" > /dev/console 2>&1
+  [ $? -eq 0 ] || { echo "Error - waiting" > /dev/console; sleep 15; }
  fi
 fi
 
