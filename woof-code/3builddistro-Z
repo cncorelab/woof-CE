@@ -18,6 +18,11 @@ export PTHEME #build.conf - woof-code/rootfs-packages/ptheme
 export XTRA_FLG # build.conf - extra naming for iso
 KERNEL_REPO_URL=${KERNEL_REPO_URL:-http://distro.ibiblio.org/puppylinux/huge_kernels} #can change var
 
+# $DISTRO_UNIONFS is read by init in the initramfs
+# it's ignored in the final rootfs
+sed -i '/DISTRO_UNIONFS/d' DISTRO_SPECS
+echo "DISTRO_UNIONFS='${UNIONFS}'" >> DISTRO_SPECS
+
 . ./DISTRO_SPECS      #this has DISTRO_VERSION.
 
 source_compat_repos  # ./DISTRO_COMPAT_REPOS-
