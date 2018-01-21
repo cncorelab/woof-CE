@@ -1,0 +1,947 @@
+#!/bin/sh
+# see also /sbin scripts: usablefs, set_plang, wait4usb, switch
+#
+# _FN = _FILENAME
+# _MP = _MOUNTPOINT
+#
+
+#Aufs layers setup by this script...
+#aufs layers:            RW (top)      RO1             RO2              PUPMODE
+#First boot (or pfix=ram):  tmpfs                         pup_xxx.sfs      5
+#pup_save is a partition:   PDEV1                         pup_xxx.sfs      6
+#ditto, but flash drive:    tmpfs         PDEV1           pup_xxx.sfs      7
+#Normal running puppy:      pup_save.3fs                  pup_xxx.sfs      12
+#ditto, but flash drive:    tmpfs         pup_save.3fs    pup_xxx.sfs      13
+#Multisession cd/dvd:       tmpfs         folders         pup_xxx.sfs      77
+
+######################## localization ########################
+#ex: /locale/<locale>/init.mo
+L_WINDOWS_HIBERNATED="ERROR: Windows NTFS hibernated partition, cannot mount"
+L_DONE="done"
+L_FAILED="failed"
+L_ERROR_IS_TOO_CRITICAL="Error is too critical, dropping out to console..."
+L_USING_FILE="Using '%s' as the %s file..." #printf
+L_LOADING_PUPSAVE='Using personal storage %s [%s]...' #printf
+L_RAM_DISK_FULL="RAM disk full, copy failed at %s" #printf
+L_WAITING_FOR_USB="Waiting for USB storage."
+L_COPY_MESSAGE="copying to ram"
+L_LOAD_MESSAGE="main"
+L_ERR_ONEPART_NOT_OK="%s %s is not Ok." #printf
+L_ERR_ONEPART_MOUNT_SFS_FAILED="[%s] %s mount of sfs failed." #printf
+L_DROPPED_TO_INITRD_SHELL="Dropped to initramfs shell. Type 'exec switch' to continue booting Puppy."
+L_SWITCH_ROOT="Performing a 'switch_root' to the layered filesystem..."
+L_ERROR_FAILED_AUFS_STACK='Failed to create overlay stack'
+L_ADDING_MODULE="Adding module %s" #printf
+L_ERR_SFS_NOT_FOUND="File \"%s\" not found on [%s]." #printf
+L_ERR_PART_NOT_FOUND="Puppy partition [%s] not found." #printf
+L_ERR_PART_NOT_MOUNT="Mounting %s on %s as %s failed.." #printf
+L_ERR_PDRV_NOT_SPECD="Puppy install partition is not specified."
+L_ERR_NO_DISTRO_SPECS="No DISTRO_SPECS file found."
+L_LOADING_SFS="Mounting %s on %s..." #printf
+L_ERR_PDRV_NO_DEFAULT="Default filename for puppy...sfs not defined."
+L_ERR_NO_OVERLAY="OverlayFs is not supported by this kernel."
+L_PUPMODE="Booting with PUPMODE=%s"
+L_PASSWORD="Password for %s: " #printf
+L_PASSWORD_MSG_1="NOTICE: As you type your password nothing will be displayed on the screen."
+L_PASSWORD_MSG_2="This is a security measure. Just type it in then press ENTER key..."
+L_OPEN_LUKS="Opening Luks partition %s as %s" #printf
+
+##############################################################
+
+/sbin/usablefs # mount: /proc /sys /dev / (proc sysfs devtmpfs rootfs)
+
+export TERM="xterm"
+export TERMINFO="/usr/share/terminfo"
+export LANG=C
+PATH="/bin:/sbin"
+KERNELVER="$(uname -r)"
+VFAT_OUT_PARAM='shortname=mixed,quiet,utf8' #see also /sbin/set_plang
+
+[ $loglevel ] && LOGLEVEL=$loglevel #v2.22
+
+#=============================================================
+#                        FUNCTIONS
+#=============================================================
+
+process_boot_specs() {
+	#process BOOT_SPECS file
+	OVERIDE='yes'
+	while IFS='' read -r LINE;do
+		[ "${LINE:0:1}" = "#" ] && continue
+		eval VAL=\$${LINE%%=*}
+		[ "$OVERIDE" = "yes" -o "$VAL" = "" ] && eval $LINE
+	done < "$1"
+}
+
+do_cd_stuff() {
+	local CD_FS CD_PART BS_FILE
+	CD_FS="iso9660"
+	CD_PART="$(grep -ls "$CD_FS" /tmp/disk/* | tail -n1)"; CD_PART="${CD_PART##*/}"
+	[ "$CD_PART" ] || { CD_FS="udf"; CD_PART="$(grep -ls "$CD_FS" /tmp/disk/* | tail -n1)"; CD_PART="${CD_PART##*/}"; }
+	[ -d "/mnt/$CD_PART" ] || mkdir -p "/mnt/$CD_PART"
+	mount -t "$CD_FS" -o ro "/dev/$CD_PART" "/mnt/$CD_PART"
+	if [ $? -eq 0 ];then
+		if [ "$PNOBS" != "yes" ];then
+			#writing BOOT_SPECS-nnn file simply adds 1, starts at 100
+			BS_FILE="$(ls -1 -r "/mnt/$CD_PART" | grep -m1 '^BOOT_SPECS')"
+			[ -f "/mnt/$CD_PART/$BS_FILE" ] && process_boot_specs "/mnt/$CD_PART/$BS_FILE"
+		fi
+		[ "$PDRV" ] || PDRV="$CD_PART"
+	fi
+}
+
+fsck_func() {
+	# "$1" - partition device - ex: /dev/sdb2
+	# "$2" - fstype - ex: ext2
+	local FSCK_APP FSCK_OPT
+	case $2 in
+		ext2|ext3|ext4) FSCK_APP='e2fsck' ; FSCK_OPT='-y' ;;
+		vfat|msdos) FSCK_APP='fsck.fat' ; FSCK_OPT='-y' ;;
+		exfat) FSCK_APP='exfatfsck' ; FSCK_OPT='' ;;
+		*) return ;;
+	esac
+	if [ "$(echo "$FSCKDPARTS" | grep -m1 "${1}|")" = "" ];then
+		FSCKDPARTS="${FSCKDPARTS}${1}|"
+		which "${FSCK_APP}" > /dev/null || { echo "WARNING: '${FSCK_APP}' not found"; return; }
+		echo "Doing fsck of ${1} as ${2} with ${FSCK_APP}."
+		${FSCK_APP} ${FSCK_OPT} ${1} 2>&1 | tee /dev/console
+	fi
+}
+
+mnt_func() {
+	local MNT_T MNT_DEV MNT_DIR MNT_O MNT_DSK
+	MNT_T="$1"    #ex: vfat
+	MNT_DEV="$2"  #ex: /dev/sda1
+	MNT_DIR="$3"  #ex: /mnt/sda1
+	MNT_O="$4"    #ex: noatime   [optional]
+	MNT_DSK="${MNT_DEV#/dev/}"
+	if [ ${#MNT_DSK} -gt 3 ];then
+		MNT_DSK=${MNT_DSK%[0-9]}; MNT_DSK=${MNT_DSK%[0-9]}; MNT_DSK=${MNT_DSK%[0-9]} #remove upto 3 trailing digits
+	fi
+	if [ "$PTRIM" = "yes" ];then
+		if [ -f "/sys/block/$MNT_DSK/queue/rotational" ];then
+			if [ "$(cat /sys/block/$MNT_DSK/queue/rotational)" = "0" ];then
+				if [ "$MNT_T" = "ext4" -o "$MNT_T" = "f2fs" ];then
+					if [ "$MNT_O" = "" ];then
+						MNT_O="discard"
+					else
+						MNT_O="${MNT_O},discard"
+					fi
+				fi
+			fi
+		fi
+	fi
+	[ "$PNOFSCKP" = "yes" ] || fsck_func "$MNT_DEV" "$MNT_T"
+	echo "Mounting $MNT_DEV on $MNT_DIR as $MNT_T."
+	case $MNT_T in
+		ntfs)
+			ntfs-3g $MNT_DEV $MNT_DIR -o umask=0,no_def_opts,noatime,rw,silent 2>/dev/null #default is rw. 130211 add silent.
+			ntfsRETVAL=$?
+			[ $ntfsRETVAL -eq 0 ] && return 0
+			if [ $ntfsRETVAL -eq 14 ];then
+				echo -e "\\033[1;31m${L_WINDOWS_HIBERNATED}\\033[0;39m" >/dev/console #31=red
+				return 14
+			else
+				ntfs-3g $MNT_DEV $MNT_DIR -o umask=0,no_def_opts,noatime,rw,force,silent 2>/dev/null #130211 add silent.
+			fi
+		;;
+		vfat)  mount -t $MNT_T -o noatime,${VFAT_OUT_PARAM} $MNT_DEV $MNT_DIR ;;
+		exfat) mount.exfat-fuse $MNT_DEV $MNT_DIR ;;
+		*)
+			if [ "$MNT_O" = "" ];then
+				mount -t $MNT_T $MNT_DEV $MNT_DIR
+			else
+				mount -t $MNT_T -o $MNT_O $MNT_DEV $MNT_DIR
+			fi
+		;;
+	esac
+	return $?
+}
+
+umount_unneeded() {
+	local MTD_PARTS ONE_PART
+	MTD_PARTS="$(grep '^/dev' /proc/mounts | grep -v 'squashfs' | cut -f1 -d' ')"
+	for ONE_PART in $MTD_PARTS;do
+		if [ "$(echo -n "$KEEPMOUNTED" | grep -m1 "${ONE_PART#/dev/}")"  = "" ];then
+			echo "umount_unneeded - umounting ${ONE_PART}"
+			umount $ONE_PART
+		else
+			echo "umount_unneeded - keeping ${ONE_PART}"
+		fi
+	done
+}
+
+echo_spec() {
+	# "$1" = an sfs spec e.g. sdb2:/pup/test_it.sfs
+	[ "$1" ] || return
+	get_fstype "${1%%:*}"
+	echo "${1%%:*},${get_fstype_RET},${1#*:}"
+}
+
+display_msg() {
+	# "$1" - message - ex: "Something failed"
+	[ "$1" ] || return
+	echo $2 "$1" > /dev/console
+	echo "$1"
+}
+
+check_status() {
+	# "$1" - status value - ex: 0"
+	[ "$1" ] || return
+	if [ $1 -eq 0 ] ;then
+		echo -en "\\033[74G" >/dev/console #move to column 72. 110426: 74
+		echo -e "\\033[1;32m${L_DONE}\\033[0;39m" >/dev/console #32=green
+	else
+		echo -en "\\033[72G" >/dev/console #move to column 72.
+		echo -e "\\033[1;31m${L_FAILED}\\033[0;39m" >/dev/console #31=red
+	fi
+}
+
+fatal_error() {
+	# "$1" - message - ex: "Something failed"
+	KEEPMOUNTED=""
+	umount_unneeded
+	echo -en "\\033[1;35m" >/dev/console #35=purple
+	display_msg "*** $1"
+	echo "*** ${L_ERROR_IS_TOO_CRITICAL}" >/dev/console
+	echo -en "\\033[0;39m" >/dev/console
+	exec /bin/sh >/dev/console 2>&1
+}
+
+wait_for_usb() {
+	[ -e /tmp/flag-usb-ready ] && return
+	display_msg "$L_WAITING_FOR_USB" "-n"
+	/sbin/wait4usb
+	get_part_info
+	check_status 0
+}
+
+get_part_info() {
+	local ONE_LINE ONE_PART ONE_TYPE ONE_LABEL ONE_UUID ONE_PUUID
+	[ -d /tmp/disk ] || mkdir -p /tmp/disk
+	find /tmp/disk/ -type f -delete
+	[ -d /tmp/disk/by-label ] || mkdir -p /tmp/disk/by-label
+	[ -d /tmp/disk/by-uuid ] || mkdir -p /tmp/disk/by-uuid
+	blkid |
+	while IFS='' read ONE_LINE; do
+		[ "${ONE_LINE:5:4}" = "loop" ] && continue
+		ONE_PART="${ONE_LINE%%:*}"; ONE_PART="${ONE_PART#/dev/}"
+		ONE_TYPE="${ONE_LINE#* TYPE=\"}" #find TYPE or "/" if missing
+		[ "${ONE_TYPE:0:1}" = "/" ] && ONE_TYPE="" || ONE_TYPE="${ONE_TYPE%%\"*}"
+		[ "$ONE_TYPE" ] || continue
+		[ "$ONE_TYPE" = "swap" ] && continue
+		ONE_LABEL="${ONE_LINE#* LABEL=\"}" #find LABEL or "/" if missing
+		[ "${ONE_LABEL:0:1}" = "/" ] && ONE_LABEL="" || ONE_LABEL="${ONE_LABEL%%\"*}"
+		ONE_UUID="${ONE_LINE#* UUID=\"}" #find UUID or "/" if missing
+		[ "${ONE_UUID:0:1}" = "/" ] && ONE_UUID="" || ONE_UUID="${ONE_UUID%%\"*}"
+		ONE_PUUID="${ONE_LINE#* PARTUUID=\"}" #find PARTUUID or "/" if missing
+		[ "${ONE_PUUID:0:1}" = "/" ] && ONE_PUUID="" || ONE_PUUID="${ONE_PUUID%%\"*}"
+		echo "$ONE_TYPE" > "/tmp/disk/$ONE_PART"
+		[ "$ONE_LABEL" ] && echo "$ONE_PART" > "/tmp/disk/by-label/$ONE_LABEL"
+		[ "$ONE_UUID" ] && echo "$ONE_PART" > "/tmp/disk/by-uuid/$ONE_UUID"
+		[ "$ONE_PUUID" ] && echo "$ONE_PART" > "/tmp/disk/by-uuid/$ONE_PUUID"
+	done
+}
+
+get_fstype() {
+	# "$1" - partition - ex: sdb2
+	get_fstype_RET=""
+	[ "${1}" ] || return
+	[ -f "/tmp/disk/${1}" ] && read get_fstype_RET < "/tmp/disk/${1}"
+}
+
+decode_part_id() {
+	# "$1" = a partition id e.g. sdb2 or Linux or d304ea0b-d87a-415f-93e7-44275ade4a77
+	decode_part_id_RET=""
+	[ "${1}" ] || return
+	[ -f "/tmp/disk/${1}" ] && { decode_part_id_RET="${1}"; return; }
+	[ -f "/tmp/disk/by-label/${1}" ] && { read decode_part_id_RET < "/tmp/disk/by-label/${1}"; return; }
+	[ -f "/tmp/disk/by-uuid/${1}" ] && read decode_part_id_RET < "/tmp/disk/by-uuid/${1}"
+}
+
+expand_file_spec() {
+	# "$1" = an sfs spec e.g. sdb2:/pup/test_it.sfs
+	# "$2" = default partition e.g. sda4
+	# "$3" = default sub-directory e.g. /sub/dir
+	expand_file_spec_RET=""
+	[ "${1}" ] || return 1
+	local LO_ID LO_FN LO_PART
+	LO_ID=""; LO_FN=""; LO_PART=""
+	case ${1} in
+		*:*) LO_ID="${1%%:*}"; LO_FN="${1#*:}" ;;
+		*) LO_ID="${1}" ;;
+	esac
+	if [ "$LO_ID" ];then
+		decode_part_id "$LO_ID"
+		[ "$decode_part_id_RET" ] || { wait_for_usb; decode_part_id "$LO_ID"; }
+		LO_PART="$decode_part_id_RET"
+	fi
+	[ "$LO_PART" ] || LO_PART="${2}"
+	[ "$LO_PART" ] || return 1
+	[ "$LO_FN" ] || return 3
+	case $LO_FN in
+		*/) return 3 ;;
+	esac
+	[ "${LO_FN:0:1}" != "/" ] && LO_FN="${3}/$LO_FN"
+	expand_file_spec_RET="$LO_PART:$LO_FN"
+	return 0
+}
+
+sortout_sfs_spec() {
+	# "$1" = an sfs spec e.g. sdb2:/pup/test_it.sfs
+	# "$2" = a default filename e.g. adrv_tahr_6.0.5.sfs
+	# uses global PDRV_PART and PSUBDIR
+	sortout_sfs_spec_RET=""
+	if [ "${2}" -a -f "/${2}" ];then
+		# humungus initrd support
+		sortout_sfs_spec_RET="rootfs:/${2}"
+	else
+		case ${1} in
+			*/) expand_file_spec "${1}${2}" "$PDRV_PART" "$PSUBDIR"; STATUS=$? ;;
+			*:*) expand_file_spec "${1}" "$PDRV_PART" "$PSUBDIR"; STATUS=$? ;;
+			*) expand_file_spec "${1}:${2}" "$PDRV_PART" "$PSUBDIR"; STATUS=$? ;;
+		esac
+		[ $STATUS -eq 0 ] || return $STATUS
+		sortout_sfs_spec_RET="$expand_file_spec_RET"
+	fi
+} 
+
+ensure_mounted() {
+	# "$1" - partition - ex: sda3
+	ensure_mounted_RET=""
+	[ "${1}" ] || { ensure_mounted_RET="$(printf "$L_ERR_PART_NOT_FOUND" "")"; return 1; }
+	local MP
+	MP="$(grep -m1 "^/dev/${1}" /proc/mounts)"
+	[ "$MP" ] && { MP=${MP#* }; MP=${MP%% *}; }
+	if [ "$MP" = "" ];then
+		get_fstype "${1}"
+		[ "$get_fstype_RET" ] || { ensure_mounted_RET="$(printf "$L_ERR_PART_NOT_FOUND" "${1}")"; return 1; }
+		MP="/mnt/$(echo ${1} | tr '/' '+')"
+		[ -d "$MP" ] || mkdir -p $MP
+		mnt_func $get_fstype_RET "/dev/${1}" "$MP" #-t $get_fstype_RET /dev/$1 $MP
+		[ $? -eq 0 ] || { ensure_mounted_RET="$(printf "$L_ERR_PART_NOT_MOUNT" "${1}" "$MP" "$get_fstype_RET")"; return 1; }
+	fi
+	ensure_mounted_RET="$MP"
+	return 0
+}
+
+spec2file() {
+	# "$1" = an sfs spec e.g. sdb2:/pup/test_it.sfs
+	spec2file_RET=""
+	if [ "${1%:*}" = "rootfs" ];then
+		# humungus initrd support
+		spec2file_RET="${1#*:}"
+	else
+		ensure_mounted "${1%:*}"
+		[ $? -eq 0 ] || { spec2file_RET="$ensure_mounted_RET"; return 1; }
+		spec2file_RET=${ensure_mounted_RET}${1#*:}
+	fi
+}
+
+open_lucks() {
+	# "$1" - partition spec e.g. Linux or sdb4
+	open_lucks_RET=''
+	[ "${1}" ] || return 1
+	local FS_TYPE
+	if [ -e "/dev/mapper/${1}" ]; then
+		open_lucks_RET="mapper/${1}"
+	elif [ "$(which cryptsetup)" ]; then
+		[ -L "/lib/modules/${KERNELVER}" ] || ln -sv /pup_sfss/lib/modules/${KERNELVER} /lib/modules/${KERNELVER}
+		for ONE_MOD in dm-crypt xts;do
+			if [ "$(grep "$ONE_MOD" /pup_sfss/lib/modules/${KERNELVER}/modules.builtin)" = "" ];then
+				display_msg "$(printf "${L_ADDING_MODULE}" "$ONE_MOD")" "-n"
+				modprobe $ONE_MOD
+				check_status $?
+			fi
+		done
+		echo "${L_PASSWORD_MSG_1}"  >/dev/console
+		echo "${L_PASSWORD_MSG_2}" >/dev/console
+		echo -en "\\033[1;36m" >/dev/console #aqua-blue
+		echo -n "$(printf "${L_PASSWORD}" "/dev/${1}")" >/dev/console
+		echo -en "\\033[0;39m" >/dev/console
+		read -s MYPASS
+		echo >/dev/console
+		display_msg "$(printf "${L_OPEN_LUKS}" "/dev/${1}" "/dev/mapper/${1}")" "-n"
+		echo -n "$MYPASS" | cryptsetup open "/dev/${1}" "${1}" -
+		[ $? -eq 0 ] || { check_status 1; return 1; }
+		FS_TYPE="$(blkid /dev/mapper/${1})"
+		FS_TYPE="${FS_TYPE#* TYPE=\"}"; FS_TYPE="${FS_TYPE%\"}"
+		[ -d "/tmp/disk/mapper" ] || mkdir -p "/tmp/disk/mapper"
+		echo "$FS_TYPE" > "/tmp/disk/mapper/${1}"
+		open_lucks_RET="mapper/${1}"
+		check_status 0
+	fi
+}
+
+ensure_save_mounted() {
+	# "$1" - partition spec e.g. Linux or sdb4:/puppy/linuxFS.4fs
+	# updates global KEEPMOUNTED
+	ensure_save_mounted_RET=""
+	local FILE_PART FILE_REL FILE_FN FILE_LOOP FILE_FS SAVE_DEV
+	[ "${1}" ] || return 1
+	case ${1} in
+		*:*)
+			expand_file_spec "$1"
+			if [ $? -eq 0 ]; then
+				FILE_PART="${expand_file_spec_RET%%:*}"
+				FILE_REL="${expand_file_spec_RET#*:}"
+				ensure_mounted "$FILE_PART"
+				if [ $? -eq 0 ]; then
+					FILE_FN="${ensure_mounted_RET}${FILE_REL}"
+					[ -f "$FILE_FN" ] || return 1
+					FILE_LOOP="$(losetup -f)"
+					if [ "$FILE_LOOP" ]; then
+						losetup $FILE_LOOP "$FILE_FN" > /dev/null
+						if [ $? -eq 0 ]; then
+							echo "Using $FILE_FN as $FILE_LOOP."
+							FILE_FS="$(blkid $FILE_LOOP)"
+							FILE_FS="${FILE_FS#* TYPE=\"}"; FILE_FS="${FILE_FS%\"}"
+							if [ "$FILE_FS" ];then
+								SAVE_DEV=${FILE_LOOP#/dev/}
+								echo "$FILE_FS" > "/tmp/disk/$SAVE_DEV"
+							fi
+						fi
+					fi 
+				fi 
+			fi
+			;;
+		*)
+			decode_part_id "$1"
+			[ "$decode_part_id_RET" ] || { wait_for_usb; decode_part_id "$1"; }
+			SAVE_DEV="$decode_part_id_RET"
+			;;
+	esac
+	[ "$SAVE_DEV" ] || return 1
+	get_fstype "$SAVE_DEV"
+	if [ "$get_fstype_RET" = "crypto_LUKS" ]; then
+		open_lucks "$SAVE_DEV"
+		SAVE_DEV="$open_lucks_RET"
+	fi
+	[ "$SAVE_DEV" ] || return 1
+	ensure_mounted "$SAVE_DEV"
+	[ $? -eq 0 ] || return 1
+	if [ "${SAVE_DEV:0:4}" = "loop" ];then #resize if needed
+		[ "$PMINAVAIL" ] || PMINAVAIL=131072
+		AVAIL=$(df | grep -m1 "$ensure_mounted_RET" | tr -s ' ' | cut -f 4 -d ' ')
+		if [ $AVAIL -lt $PMINAVAIL -a "$(which resize2fs)" != "" ];then #resize
+			OLDSIZEM="$(stat -c %s "$FILE_FN")"; OLDSIZEM=$(($OLDSIZEM / 1048576))
+			NEWSIZEM=$(($PMINAVAIL / 1024)); NEWSIZEM=$(($OLDSIZEM + $NEWSIZEM))
+			echo "Resizing $FILE_FN from ${OLDSIZEM}MiB to ${NEWSIZEM}MiB."
+			umount "$ensure_mounted_RET"
+			sync
+			dd if=/dev/zero bs=1024 count=$PMINAVAIL >> $FILE_FN 2> /dev/null
+			if [ $? -eq 0 ];then
+				sync
+				losetup $FILE_LOOP "$FILE_FN" > /dev/null
+				resize2fs -f "$FILE_LOOP" > /dev/null #no size, will fill all of file.
+				sync
+			else
+				losetup $FILE_LOOP "$FILE_FN" > /dev/null
+			fi
+			ensure_mounted "$SAVE_DEV"
+			[ $? -eq 0 ] || return 1
+		fi
+	fi
+	ensure_save_mounted_RET="$ensure_mounted_RET"
+	[ "$(echo -n $KEEPMOUNTED | grep -m1 "$SAVE_DEV")" ] || KEEPMOUNTED="${KEEPMOUNTED}${SAVE_DEV} "
+	if [ "$FILE_PART" ];then
+		[ "$(echo -n $KEEPMOUNTED | grep -m1 "$FILE_PART")" ] || KEEPMOUNTED="${KEEPMOUNTED}${FILE_PART} "
+	fi
+	return 0
+}
+
+copy_to_ram() {
+	# "$1" = an existing sfs file e.g. /mnt/sdb2/pup/test_it.sfs
+	copy_to_ram_RET=""
+	local STATUS RAMSIZE SIZESFSK TFREEK
+	if [ "$COPY2RAM" = "" ];then
+		#decide whether to try to copy .sfs's to ram
+		COPY2RAM='no'; COPYCONTENDER=''
+		[ "$PNOCOPY" = "yes" ] || COPYCONTENDER='yes'
+		[ "$PRAMONLY" = "yes" ] && COPYCONTENDER='yes'
+		if [ "$COPYCONTENDER" = "yes" ];then
+			RAMSIZE=$(free | grep -o 'Mem: .*' | tr -s ' ' | cut -f 2 -d ' ') #total physical ram (less shared video).
+			[ $RAMSIZE -gt 400000 ] && COPY2RAM='yes'
+		fi
+	fi
+	STATUS=0
+	if [ "$COPY2RAM" = "yes" ];then
+		#check if the sfs will fit
+		SIZESFSK=$(du -k "$1" | cut -f 1) #size of file
+		SIZESFSK=$(($SIZESFSK + 1000)) #some slack.
+		TFREEK=$(df | grep -m1 ' /mnt/tmpfs' | tr -s ' ' | cut -f 4 -d ' ') #space in tmpfs
+		if [ $TFREEK -gt $SIZESFSK ];then
+			if [ "${1:0:4}" = "/mnt" ];then #on a partition
+				echo " Copying $1 to /mnt/tmpfs/"
+				echo -en " \\033[1;35m${L_COPY_MESSAGE}\\033[0;39m" > /dev/console #purple.
+				cp -af "$1" /mnt/tmpfs/; STATUS=$?
+			else #is humungous initrd
+				mv -af "$1" /mnt/tmpfs/; STATUS=$?
+			fi
+			[ $STATUS -eq 0 ] && copy_to_ram_RET="/mnt/tmpfs/${1##*/}"
+		else
+			STATUS=1
+			COPY2RAM='no'
+		fi
+		[ $STATUS -eq 0 ] || copy_to_ram_RET="$(printf "$L_RAM_DISK_FULL" "${1##*/}")"
+	fi
+	return $STATUS
+}
+
+mount_sfs() {
+	# "$1" = an sfs spec e.g. sdb2:/pup/test_it.sfs
+	# "$2" = sfs ident e.g. pdrv or fdrv
+	# Updates global variable NEWUNIONRECORD
+	mount_sfs_RET=""
+	local LO_PART LO_REL LO_IDENT LO_FULL_NAME LO_NEEDED LO_SUFX LO_MP LO_TIME
+	LO_PART="${1%%:*}"; LO_REL="${1#*:}"
+	spec2file "$1"
+	[ $? -eq 0 ] || { mount_sfs_RET="$spec2file_RET"; return 3; }
+	LO_FULL_NAME="$spec2file_RET"
+	[ -f "$LO_FULL_NAME" ] || { mount_sfs_RET="$(printf "$L_ERR_SFS_NOT_FOUND" "$LO_REL" "$LO_PART")"; return 1; }
+	# validate sfs file here
+	[ -s "$LO_FULL_NAME" ] || { mount_sfs_RET="$(printf "$L_ERR_ONEPART_NOT_OK" "$LO_PART" "$LO_REL")"; return 3; }
+	LO_TIME="$(stat -Lc %Y "$LO_FULL_NAME")"
+	if [ "$2" = "pdrv" ];then
+		#for backwards compatibility
+		LO_IDENT="$L_LOAD_MESSAGE"
+		LO_SUFX='ro2'
+	else
+		LO_IDENT="$2"
+		if [ "${2:0:6}" = "extra_" ];then
+			LO_SUFX="${2#extra_}"
+		else
+			LO_SUFX="${2:0:1}"
+		fi
+	fi
+	display_msg "$(printf "$L_USING_FILE" "${spec2file_RET##*/}" "$LO_IDENT")" "-n"
+	#error exits after this must include "check_status 1;"
+	LO_NEEDED='yes'
+	[ "LO_PART" = "rootfs" ] && COPY2RAM='yes' # humungus initrd support - force copy to ram
+	copy_to_ram "$LO_FULL_NAME"
+	if [ $? -eq 0 ];then
+		[ "$copy_to_ram_RET" ] && { LO_FULL_NAME="$copy_to_ram_RET"; LO_NEEDED=''; }
+	else
+		echo "" > /dev/console
+		display_msg "$copy_to_ram_RET" "-n"
+	fi
+	LO_MP="/pup_${LO_SUFX}"
+	[ -d "$LO_MP" ] || mkdir -p "$LO_MP"
+	echo " Mounting $LO_FULL_NAME on $LO_MP."
+	mount -r -t squashfs -o ro,loop,noatime "$LO_FULL_NAME" "$LO_MP"
+	[ $? -eq 0 ] || { mount_sfs_RET="$(printf "$L_ERR_ONEPART_MOUNT_SFS_FAILED" "$LO_PART" "$LO_REL")"; check_status 1; return 3; }
+	if [ "$LO_NEEDED" = "yes" ];then
+		[ "$(echo -n $KEEPMOUNTED | grep -m1 "$LO_PART")" ] || KEEPMOUNTED="${KEEPMOUNTED}${LO_PART} "
+	fi
+	mount_sfs_RET="$LO_MP"
+	NEWUNIONRECORD="${NEWUNIONRECORD}${LO_TIME} "
+	check_status 0
+}
+
+#=============================================================
+#                           MAIN
+#=============================================================
+
+clear #clear the screen.
+
+[ ! "$LOGLEVEL" ] && exec 1>/tmp/bootinit.log 2>&1 #remove o/p from console. v2.22 loglevel added.
+
+# sets PLANG, PKEYS, VFAT_OUT_PARAM, FONTMAP, KMAP, CODEPAGE
+[ -f /sbin/set_plang ] && . /sbin/set_plang
+
+#pmedia= usbflash|usbhd|usbcd|ataflash|atahd|atacd|atazip|scsihd|scsicd|cd
+[ $pmedia ] && PMEDIA=$pmedia #boot parameter, broad category of boot media. ex: cd.
+[ $psubdir ] && PSUBDIR=$psubdir #boot parameter, directory for puppy files. ex: puppy220
+[ $psavemark ] && PSAVEMARK=$psavemark #100913 partition number that has/will-have save-file.
+
+[ $PSUBDIR ] && [ "${PSUBDIR:0:1}" != "/" ] && PSUBDIR="/${PSUBDIR}" #add leading /.
+
+[ $pdev1 ] && PDRV=$pdev1 #boot parameter, partition have booted off. ex: hda3
+#100915 requested by technosaurus (formats get changed further down)...
+[ $pdrv ] && PDRV=$pdrv #format partition:<path><filename> ex: sda2:/slacko/puppy_slacko_6.3.0.sfs
+[ $pupsfs ] && PDRV=$pupsfs
+[ $zdrv ] && ZDRV=$zdrv #ex: sda2:/slacko/zdrv_slacko_6.3.0.sfs
+[ $fdrv ] && FDRV=$fdrv
+[ $adrv ] && ADRV=$adrv
+[ $ydrv ] && YDRV=$ydrv
+#<partition>:<filename>, for savefile/savefolder. <partition> can be a name or Label or UUID
+[ $psave ] && PSAVE=$psave #ex: sdb4:/puppy/tahr/tahrsave or smark or 49baa82d-8c69:tahrsave
+#list of kernel modules to load, ex: pimod=hid-logitech-dj.ko,kernel/drivers/hid/hid-multitouch.ko 
+[ $pimod ] && PIMOD=$pimod
+#<pupmode>:<save at shutdown>, ex: 6 or 13:no
+[ $pupmode ] && PUPMODE=$pupmode
+
+if [ "$pfix" ];then
+	for ONEFIX in $(echo -n "$pfix" | tr ',' ' ');do
+		case $ONEFIX in
+			ram)     PRAMONLY='yes';;      #run in ram only (do not load ${DISTRO_FILE_PREFIX}save).
+			rdsh)    RDSH='yes';;          #exit to shell in initial ramdisk.
+			nox)     PNOX='yes';;          #do not start X.
+			trim)    PTRIM='yes';;         #add "discard" to mount options if SSD
+			copy)    PNOCOPY='';;          #copy .sfs files into ram.
+			nocopy)  PNOCOPY='yes';;       #do not copy .sfs files into ram (default is copy if enough ram).
+			fsck)    PFSCK='yes';;         #do an fsck of ${DISTRO_FILE_PREFIX}save file.
+			nofsckp) PNOFSCKP='yes';;      #disable fsck before first mount of ext and fat partitions
+			nobs)    PNOBS='yes';;         #disable BOOT_SPECS file processing
+			nosave)  PNOSAVE='yes';;       #disable automatic saving at shutdown
+			rosave)  PROSAVE='yes';;       #use read-only save layer (odd pupmode)
+			debug)   PDEBUG='yes';;        #enable extra debug messages
+			[0-9]*)  PIGNORELAST=$ONEFIX;; #blacklist last $ONEFIX folders (multisession).
+			*)       echo "pfix=$ONEFIX is not a known boot parameter";;
+		esac
+	done
+fi
+
+#clear significant global variables
+KEEPMOUNTED=''
+FSCKDPARTS=''
+NEWUNIONRECORD=''
+COPY2RAM=''
+PUNIONFS=''
+
+#set time zone
+if [ -f /TIME_ZONE ];then
+	read TZ_SPEC < /TIME_ZONE
+	case $TZ_SPEC in
+		*:*) TZ="${TZ_SPEC%:*}"; ZONE_FILE="${TZ_SPEC#*:}" ;;
+		*) TZ=$TZ_SPEC; ZONE_FILE='' ;;
+	esac
+fi
+[ "$TZ" ] && export TZ
+hwclock -l -s
+
+get_part_info
+
+#get SPECS files - in initrd.gz or specified install dir
+#both will be accessed from the same directory
+sortout_sfs_spec "$PDRV" "DISTRO_SPECS"
+[ $? -eq 0 ] || fatal_error "$L_ERR_PDRV_NOT_SPECD"
+spec2file "$sortout_sfs_spec_RET"
+if [ $? -eq 0 ];then
+	if [ -f "$spec2file_RET" ];then
+		echo "Using $spec2file_RET"
+		. "$spec2file_RET" #DISTRO_SPECS has DISTRO_VERSION, DISTRO_FILE_PREFIX
+		cp -a "$spec2file_RET" /tmp/
+	fi
+	if [ "$PNOBS" != "yes" -a -f "${spec2file_RET%/*}/BOOT_SPECS" ];then
+		echo "Using ${spec2file_RET%/*}/BOOT_SPECS"
+		process_boot_specs "${spec2file_RET%/*}/BOOT_SPECS"
+		cp -a "${spec2file_RET%/*}/BOOT_SPECS" /tmp/
+	fi
+fi
+[ "$DISTRO_FILE_PREFIX" ] || fatal_error "$L_ERR_NO_DISTRO_SPECS"
+
+echo -en "\\033[0;34m***\\033[0;37m ${DISTRO_NAME} ${DISTRO_VERSION}" > /dev/console
+echo -en "\\033[0;34m -\\033[0;37m Linux ${KERNELVER} " > /dev/console
+echo -en "\\033[0;31m[\\033[0;37m`uname -m`\\033[0;31m]" > /dev/console
+echo -e "\\033[0;34m ***\\033[0;39m" > /dev/console
+
+[ "$PMEDIA" = "cd" ] && do_cd_stuff
+
+#ensure there is a pdrv
+sortout_sfs_spec "$PDRV" "$DISTRO_PUPPYSFS"
+STATUS=$?
+if [ $STATUS -eq 0 ];then
+	PDRV_SPEC="$sortout_sfs_spec_RET"
+	PDRV_PART=${PDRV_SPEC%:*}
+	[ "$PSUBDIR" ] || { PSUBDIR=${PDRV_SPEC#*:}; PSUBDIR=${PSUBDIR%/*}; }
+else
+	[ $STATUS -eq 1 ] && fatal_error "$L_ERR_PDRV_NOT_SPECD"
+	[ $STATUS -eq 3 ] && fatal_error "$L_ERR_PDRV_NO_DEFAULT"
+fi
+
+#create default size tmpfs
+[ -d /mnt/tmpfs ] || mkdir -p /mnt/tmpfs
+mount -t tmpfs tmpfs /mnt/tmpfs
+
+#mount pdrv
+mount_sfs "$PDRV_SPEC" "pdrv"
+[ $? -eq 0 ] || fatal_error "$mount_sfs_RET"
+PDRV_MNT="$mount_sfs_RET"
+get_fstype "$PDRV_PART"
+DEV1FS="$get_fstype_RET"
+
+#mount optional puppy sfs's
+ABOVE_MNTS=''
+sortout_sfs_spec "$ADRV" "$DISTRO_ADRVSFS"
+if [ "$sortout_sfs_spec_RET" ];then
+	ADRV_SPEC="$sortout_sfs_spec_RET"
+	mount_sfs "$ADRV_SPEC" "adrv"
+	if [ $? -eq 0 ];then
+		ABOVE_MNTS="${ABOVE_MNTS}${mount_sfs_RET}:"
+	else
+		echo "$mount_sfs_RET"; ADRV_SPEC=''
+	fi
+fi
+sortout_sfs_spec "$YDRV" "$DISTRO_YDRVSFS"
+if [ "$sortout_sfs_spec_RET" ];then
+	YDRV_SPEC="$sortout_sfs_spec_RET"
+	mount_sfs "$YDRV_SPEC" "ydrv"
+	if [ $? -eq 0 ];then
+		ABOVE_MNTS="${ABOVE_MNTS}${mount_sfs_RET}:"
+	else
+		echo "$mount_sfs_RET"; YDRV_SPEC=''
+	fi
+fi
+BELOW_MNTS=''
+sortout_sfs_spec "$FDRV" "$DISTRO_FDRVSFS"
+if [ "$sortout_sfs_spec_RET" ];then
+	FDRV_SPEC="$sortout_sfs_spec_RET"
+	mount_sfs "$FDRV_SPEC" "fdrv"
+	if [ $? -eq 0 ];then
+		BELOW_MNTS="$BELOW_MNTS$mount_sfs_RET:"
+	else
+		echo "$mount_sfs_RET"; FDRV_SPEC=''
+	fi
+fi
+ZDRV_MNTPT=''
+sortout_sfs_spec "$ZDRV" "$DISTRO_ZDRVSFS"
+if [ "$sortout_sfs_spec_RET" ];then
+	ZDRV_SPEC="$sortout_sfs_spec_RET"
+	mount_sfs "$ZDRV_SPEC" "zdrv"
+	if [ $? -eq 0 ];then
+		BELOW_MNTS="${BELOW_MNTS}${mount_sfs_RET}:"
+		ZDRV_MNTPT="${mount_sfs_RET%%:*}"
+	else
+		echo "$mount_sfs_RET"; ZDRV_SPEC=''
+	fi
+fi
+
+XTRA_MNTS=''
+if [ "$XTRA_SFS" ];then
+	IFSBAK=$IFS; IFS=','
+	for ONE_LINE in $XTRA_SFS;do
+		sortout_sfs_spec "$ONE_LINE"
+		if [ "$sortout_sfs_spec_RET" ];then
+			NEXT="$(losetup -f 2>/dev/null)"
+			if [ "$NEXT" ];then
+				NUM=${NEXT#/dev/loop}; NUM=${NUM#/}
+				mount_sfs "$sortout_sfs_spec_RET" "extra_${NUM}"
+				if [ $? -eq 0 ];then
+					XTRA_MNTS="${XTRA_MNTS}${mount_sfs_RET}:"
+				else
+					echo "$mount_sfs_RET"
+				fi
+			fi
+		fi
+	done
+	IFS=$IFSBAK
+fi
+
+#ensure have overlay support
+[ -d /sys/module/overlay ] && PUNIONFS='overlay'
+#if it's a module, insmod it
+if [ "$PUNIONFS" = "" -a "$ZDRV_MNTPT" ];then
+	OVER_FN="$(grep 'overlay' $ZDRV_MNTPT/lib/modules/$KERNELVER/modules.order)"
+	if [ "$OVER_FN" ];then
+		display_msg "$(printf "${L_ADDING_MODULE}" "$OVER_FN")" "-n"
+		insmod "$ZDRV_MNTPT/lib/modules/$KERNELVER/$OVER_FN"
+		check_status $?
+		PUNIONFS='overlay'
+	fi
+fi
+[ "$PUNIONFS" != "overlay" ] && fatal_error "$L_ERR_NO_OVERLAY"
+
+#build sfs stack
+LOW_LIST="${ABOVE_MNTS}${PDRV_MNT}:${BELOW_MNTS}${XTRA_MNTS}"; 
+LOW_LIST="${LOW_LIST%:}" #remove trailing ':'
+display_msg "$(printf "${L_LOADING_SFS}" "$(echo $LOW_LIST | tr -d '/')" "/pup_sfss")" "-n"
+[ -d /pup_sfss ] || mkdir /pup_sfss
+mount -t overlay -o ro,noatime,lowerdir=${LOW_LIST} overlay /pup_sfss >/dev/console 2>&1
+[ $? -eq 0 ] || { check_status 1; fatal_error "$L_ERROR_FAILED_AUFS_STACK"; }
+check_status 0
+
+#load needed keyboard modules - initmodules
+if [ "$PIMOD" ];then
+	[ -L "/lib/modules/${KERNELVER}" ] || ln -sv /pup_sfss/lib/modules/${KERNELVER} /lib/modules/${KERNELVER}
+	for ONE_MOD in ${PIMOD//,/ };do
+		display_msg "$(printf "${L_ADDING_MODULE}" "$ONE_MOD")" "-n"
+		modprobe $ONE_MOD
+		check_status $?
+	done
+fi
+
+#sortout save layer
+PUPMODE=5
+SAVE_LAYER=''; PUP_HOME=''
+#setup rw directory
+RW_DIR='/mnt/tmpfs/pup_rw'
+WK_DIR='/mnt/tmpfs/pup_wk'
+if [ "$PRAMONLY" = "yes" ];then
+	PNOSAVE='yes'
+else
+	ensure_mounted "$PDRV_PART"
+	SAVE_TAR_FN="${ensure_mounted_RET}${PSUBDIR}/${DISTRO_FILE_PREFIX}save.ram.tar"
+	if [ "$PMODE" ];then
+		ensure_save_mounted "$P_SAVE_PART"
+		if [ "$ensure_save_mounted_RET" ];then
+			RW_DIR="${ensure_save_mounted_RET}${P_SAVE_DIR}/${DISTRO_FILE_PREFIX}save"
+			[ -d "$RW_DIR" ] || mkdir -p "$RW_DIR"
+			WK_DIR="${ensure_save_mounted_RET}${P_SAVE_DIR}/${DISTRO_FILE_PREFIX}work"
+			if [ -f "$SAVE_TAR_FN" ];then
+				[ -d "$RW_DIR" ] && rm -rf "$RW_DIR"
+				mkdir -p "$RW_DIR"
+				tar xf "$SAVE_TAR_FN" -C "$RW_DIR" 2>/dev/null
+				[ "$PNOSAVE" = "yes" ] || rm "$SAVE_TAR_FN"
+			else
+				[ "$PNOSAVE" = "yes" ] && tar cf "$SAVE_TAR_FN" -C "$RW_DIR" . 2>/dev/null 
+#				[ "$PNOSAVE" = "yes" ] && tar cf "$SAVE_TAR_FN" -C "$RW_DIR" --exclude='./initrd' --exclude='./dev' --exclude='./mnt' --exclude='./tmp' --exclude='./sys' . 2>/dev/null 
+			fi
+			if [ "$(ls -A "$RW_DIR")" ];then
+				PUPMODE=12
+				SAVE_LAYER='/pup_rw'
+				PUP_HOME="$ensure_save_mounted_RET"
+			fi
+		else
+			PNOSAVE='yes' #save part not found, may be unplugged usb
+		fi
+	fi
+	if [ $PUPMODE -eq 5 ];then
+		RW_DIR='/mnt/tmpfs/pup_rw'
+		[ -d "$RW_DIR" ] || mkdir -p "$RW_DIR"
+		WK_DIR='/mnt/tmpfs/pup_wk'
+		if [ -f "$SAVE_TAR_FN" ];then
+			tar xf "$SAVE_TAR_FN" -C "$RW_DIR"
+			if [ "$(ls -A "$RW_DIR")" ];then
+				PUPMODE=21
+			fi
+		fi
+	fi
+fi
+
+umount_unneeded
+display_msg "$(printf "${L_PUPMODE}" "$PUPMODE")"
+
+#build full stack
+if [ $PUPMODE -eq 12 ];then
+	SAVE_DEV="${ensure_save_mounted_RET#/mnt/}"; SAVE_DEV="${SAVE_DEV//+//}"
+	SAVE_SPEC="${SAVE_DEV}:${P_SAVE_DIR}/${DISTRO_FILE_PREFIX}save"
+	display_msg "$(printf "${L_LOADING_PUPSAVE}" "${SAVE_SPEC#*:}" "${SAVE_SPEC%:*}")" "-n"
+	decode_part_id "${P_SAVE_PART%:*}"
+	case $P_SAVE_PART in
+		*:*) SAVE_PART="${decode_part_id_RET}:${P_SAVE_PART#*:}" ;;
+		*) SAVE_PART="${decode_part_id_RET}" ;;
+	esac
+	check_status 0
+else
+	SAVE_SPEC=''
+	SAVE_PART=''
+fi
+
+[ -d "$RW_DIR" ] || mkdir -p "$RW_DIR"
+[ -d "$WK_DIR" ] || mkdir -p "$WK_DIR"
+[ -d /pup_new ] || mkdir /pup_new
+#cleanout $RW_DIR/initrd
+if [ -d "$RW_DIR/initrd" ];then
+	rm -rf "$RW_DIR/initrd"
+	mkdir -p "$RW_DIR/initrd"
+fi
+
+LOW_LIST='/pup_sfss'; LOW_DISP='pup_sfss'
+if [ -d "$RO_DIR" ];then
+	LOW_LIST="${RO_DIR}:${LOW_LIST}"
+	LOW_DISP="${RO_DIR##*/}:${LOW_DISP}"
+fi
+display_msg "$(printf "${L_LOADING_SFS}" "${RW_DIR##*/}:${LOW_DISP}" "/pup_new")" "-n"
+mount -t overlay -o lowerdir=${LOW_LIST},upperdir=${RW_DIR},workdir=${WK_DIR} overlay /pup_new >/dev/console 2>&1
+[ $? -eq 0 ] || { check_status 1; fatal_error "$L_ERROR_FAILED_AUFS_STACK"; }
+check_status 0
+
+mkdir -p /pup_new/etc/rc.d
+( # > /pup_new/etc/rc.d/PUPSTATE
+echo "PUPMODE=$PUPMODE"
+echo "PDEV1='$PDRV_PART'"
+echo "DEV1FS='$DEV1FS'"
+echo "PUPSFS='$(echo_spec $PDRV_SPEC)'"
+echo "PUPSAVE='$(echo_spec $SAVE_SPEC)'"
+echo "PMEDIA='$PMEDIA'"
+echo '#these directories are overlayfs layers in /initrd...'
+echo "SAVE_LAYER='$SAVE_LAYER'"
+echo "PUP_LAYER='$PDRV_MNT'"
+echo "#The partition that contains the ${DISTRO_FILE_PREFIX}save file is mounted here..."
+echo "PUP_HOME='$PUP_HOME'"
+echo '#(in /initrd) ...note, /mnt/home is a link to it.'
+echo '#this file has extra kernel drivers and firmware...'
+echo "ZDRV='$(echo_spec $ZDRV_SPEC)'"
+echo "FDRV='$(echo_spec $FDRV_SPEC)'"
+echo "ADRV='$(echo_spec $ADRV_SPEC)'"
+echo "YDRV='$(echo_spec $YDRV_SPEC)'"
+echo "PSUBDIR='$PSUBDIR'"
+echo "PSAVEPART='$SAVE_PART'"
+echo "PSAVEDIR='$P_SAVE_DIR'"
+echo "PNOSAVE='$PNOSAVE'"
+echo "PUNIONFS='$PUNIONFS'"
+[ -f /sbin/set_plang ] && plang_pupstate #echo
+) > /pup_new/etc/rc.d/PUPSTATE
+
+if [ $PUPMODE -eq 5 ];then
+	echo "" > /pup_new/etc/rc.d/BOOTCONFIG
+	echo "LASTUNIONRECORD=''" >> /pup_new/etc/rc.d/BOOTCONFIG
+else
+	[ -f /pup_new/etc/rc.d/BOOTCONFIG ] && . /pup_new/etc/rc.d/BOOTCONFIG
+	echo "PREVUNIONRECORD='$LASTUNIONRECORD'" > /pup_new/etc/rc.d/BOOTCONFIG
+	echo "LASTUNIONRECORD='${NEWUNIONRECORD% }'" >> /pup_new/etc/rc.d/BOOTCONFIG
+fi
+
+echo -n "${L_SWITCH_ROOT}" > /dev/console
+
+#move mountpoints
+for ONE_MNT in $(grep ' /pup' /proc/mounts | cut -f2 -d' ' | grep -v 'pup_new');do
+	mkdir -p /pup_new/initrd${ONE_MNT}
+	echo "mount -o move $ONE_MNT /pup_new/initrd${ONE_MNT}"
+	mount -o move $ONE_MNT /pup_new/initrd${ONE_MNT}
+done
+for ONE_MNT in $(grep ' /mnt' /proc/mounts | cut -f2 -d' ');do
+	mkdir -p /pup_new/initrd${ONE_MNT}
+	echo "mount -o move $ONE_MNT /pup_new/initrd${ONE_MNT}"
+	mount -o move $ONE_MNT /pup_new/initrd${ONE_MNT}
+done
+
+#copy/move extra stuff
+[ -f /tmp/DISTRO_SPECS ] && mv /tmp/DISTRO_SPECS /pup_new/initrd/
+[ -f /tmp/BOOT_SPECS ] && mv /tmp/BOOT_SPECS /pup_new/initrd/
+[ -f /TIME_ZONE ] && cp /TIME_ZONE /pup_new/initrd/
+cp -a /proc/cmdline /pup_new/initrd/
+cp -a /init /pup_new/initrd/
+chmod -x /pup_new/initrd/init
+[ -f /sbin/set_plang ] && plang_copy_to_newroot #$LANG, /etc/keymap|fontmap|codepage
+
+#set time zone link for after switch
+if [ "$ZONE_FILE" -a $PUPMODE -eq 5 ];then
+	[ -f "/pup_new/usr/share/zoneinfo/$ZONE_FILE" ] && ln -snfv "/usr/share/zoneinfo/$ZONE_FILE" /pup_new/etc/localtime
+fi
+
+#setup symlinks for after switch
+if [ "$RW_DIR" -a -d /pup_new/initrd${RW_DIR} ];then
+	rm -rf /pup_new/initrd/pup_rw
+	ln -sv /initrd${RW_DIR} /pup_new/initrd/pup_rw #for after switch
+fi
+#setup /tmp for after switch
+mkdir -p /pup_new/initrd/mnt/tmpfs/tmp
+if [ -d /pup_new/initrd/mnt/tmpfs/tmp ];then #extra paranoid precaution
+	chmod 1777 /pup_new/initrd/mnt/tmpfs/tmp
+	rm -rf /pup_new/tmp
+	ln -sv /initrd/mnt/tmpfs/tmp /pup_new/tmp #for after switch
+fi
+
+#copy /tmp
+[ -d "/pup_new/initrd/tmp" ] && rm -rf /pup_new/initrd/tmp
+mkdir -p /pup_new/initrd/tmp
+cp -af /tmp/* /pup_new/initrd/tmp/ #keep any log files.
+
+if [ "$RDSH" = "yes" ];then
+	echo > /dev/console
+	echo "${L_DROPPED_TO_INITRD_SHELL}" > /dev/console
+	exec /bin/sh >/dev/console 2>&1
+fi
+
+sync
+[ -d "/proc/bus/usb" ] && umount /proc/bus/usb
+umount /sys
+umount /dev
+umount /proc
+
+#now using cpio archive for initramfs 'initial ramdisk'...
+exec switch_root /pup_new /sbin/init
+
+###END###
