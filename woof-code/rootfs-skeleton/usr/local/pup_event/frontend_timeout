@@ -81,6 +81,9 @@ do
 		16|24|17|25) #unipup.
 			free_initrd_func
 			;;
+		29) #overlay pupode=29 (13+16), that will be a pseudo pupmode=13. 
+			free_flash_func
+			;;
 		*)   
 			free_func
 			;;
