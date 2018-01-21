@@ -1,0 +1,65 @@
+#!/bin/ash
+
+info_exit() {
+	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$INFO_ICON" --button=gtk-ok:0 \
+		--text "$1"
+	exec "$EXE_DIR/extra_sfs_main"
+}
+
+error_exit() {
+	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$ERR_ICON" --button=gtk-ok:1 \
+		--text "$1"
+	exec "$EXE_DIR/extra_sfs_main"
+}
+
+EXE_DIR="$(dirname $(readlink -f ${0}))"
+[ -f "$EXE_DIR/extra_sfs_common" ] && . "$EXE_DIR/extra_sfs_common"
+[ -f "$CONF_FILE" ] && . "$CONF_FILE"
+
+if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
+	YAD_EXE='yad64'
+else
+	YAD_EXE='yad32'
+fi
+
+SFS_BN="$1"
+[ "$SFS_BN" ] || info_exit "No extra sfs file was selected."
+
+XTRA_SFS="$(tmpbs2variable -q XTRA_SFS)"
+
+NL='
+'
+SFS_SPEC="$(echo "${XTRA_SFS//,/$NL}" | grep "$SFS_BN")"
+
+# remove SFS_SPEC from list
+XTRA_NOT=''; THIS_NUM=0; NUM=0
+IFS_BAK=$IFS; IFS=','
+for ONE_SFS in $XTRA_SFS;do
+	if [ "$ONE_SFS" = "$SFS_SPEC" ];then
+		THIS_NUM=$NUM
+	else
+		XTRA_NOT="${XTRA_NOT}${ONE_SFS},"
+	fi
+	NUM=$(($NUM + 1))
+done
+
+if [ "$XTRA_NOT" ];then
+	XTRA_NOT="${XTRA_NOT%,}"
+	# insert SFS_SPEC up 1 position
+	[ $THIS_NUM -gt 0 ] && THIS_NUM=$((THIS_NUM - 1))
+	XTRA_NEW=''; NUM=0
+	for ONE_SFS in $XTRA_NOT;do
+		[ $NUM -eq $THIS_NUM ] && XTRA_NEW="${XTRA_NEW}${SFS_SPEC},"
+		XTRA_NEW="${XTRA_NEW}${ONE_SFS},"
+		NUM=$(($NUM + 1))
+	done
+	IFS=$IFS_BAK
+	XTRA_SFS="${XTRA_NEW%,}"
+	variable2tmpbs -q XTRA_SFS "$XTRA_SFS"
+else
+	IFS=$IFS_BAK
+fi
+
+exec "$EXE_DIR/extra_sfs_main"
+
+exit

@@ -1,0 +1,13 @@
+if [ -f "/usr/share/pixmaps/puppy/dialog-info.svg" ]; then
+	INFO_ICON="$EXE_DIR/icons/dialog-info.svg"
+	ERR_ICON="$EXE_DIR/icons/dialog-error.svg"
+	QUIT_ICON="$EXE_DIR/icons/quit.svg"
+else
+	INFO_ICON="dialog-information"
+	ERR_ICON="dialog-error"
+	QUIT_ICON="$EXE_DIR/icons/quit.png"
+fi
+
+CONF_FILE="$HOME/.config/extra_sfs.conf"
+ICON_FILE='/usr/share/pixmaps/squashfs-image.png'
+MAIN_TITLE="extra_sfs v.0.4"

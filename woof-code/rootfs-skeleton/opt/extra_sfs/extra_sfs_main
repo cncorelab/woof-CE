@@ -1,0 +1,51 @@
+#!/bin/ash
+
+EXE_DIR="$(dirname $(readlink -f ${0}))"
+[ -f "$EXE_DIR/extra_sfs_common" ] && . "$EXE_DIR/extra_sfs_common"
+[ -f "$CONF_FILE" ] && . "$CONF_FILE"
+
+if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
+	YAD_EXE='yad64'
+else
+	YAD_EXE='yad32'
+fi
+
+ADD_ICON="$EXE_DIR/icons/add.png"
+UP_ICON="$EXE_DIR/icons/up.png"
+DEL_ICON="$EXE_DIR/icons/delete.png"
+
+
+TMP_LIST='/tmp/extra_sfs_tmp_list.txt'
+[ -f "$TMP_LIST" ] && rm "$TMP_LIST"
+
+XTRA_SFS="$(tmpbs2variable -q XTRA_SFS)"
+
+if [ "$XTRA_SFS" ];then
+	IFS_BAK=$IFS; IFS=','
+	for ONE_LINE in $XTRA_SFS;do
+		FN="${ONE_LINE#*:}"; FN="${FN##*/}"
+		echo "$FN" >> "$TMP_LIST"
+	done
+	IFS=$IFS_BAK
+	SPEC_FN="$($YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --width=220 --height=180 --title "$MAIN_TITLE" \
+			--text "Defined extra sfs files:" \
+			--list --no-headers --column=Loaded < $TMP_LIST \
+			--button="Add!$ADD_ICON!Add sfs to list":3 --button="Up!$UP_ICON!Move sfs up in list":4 --button="Delete!$DEL_ICON!Delete sfs from list":6 --button=Exit!$QUIT_ICON:0)"
+	STATUS=$?
+	rm -f "$TMP_LIST "
+else
+	SPEC_FN=""
+	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --width=220 --height=80 --title "$MAIN_TITLE" --buttons-layout=center \
+			--text "There are no extra sfs files defined." \
+			--button=Add!$ADD_ICON:3 --button=Exit!$QUIT_ICON:0
+	STATUS=$?
+fi
+case $STATUS in
+	3) exec "$EXE_DIR/extra_sfs_add" ;;
+	4) exec "$EXE_DIR/extra_sfs_up" "${SPEC_FN%|}" ;;
+	6) exec "$EXE_DIR/extra_sfs_delete" "${SPEC_FN%|}" ;;
+esac
+
+[ "$DID_MOUNT" = "yes" ] && { sync; umount "$SFS_MP"; }
+
+exit

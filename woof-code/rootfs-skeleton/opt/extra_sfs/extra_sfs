@@ -1,0 +1,50 @@
+#!/bin/ash
+
+[ "$DISPLAY" ] || exit
+
+EXE_DIR="$(dirname $(readlink -f ${0}))"
+[ -f "$EXE_DIR/extra_sfs_common" ] && . "$EXE_DIR/extra_sfs_common"
+
+if [ "$(file -Lb /bin/busybox | grep '64-bit')" ]; then
+	YAD_EXE='yad64'
+else
+	YAD_EXE='yad32'
+fi
+
+. /etc/rc.d/PUPSTATE
+
+DID_MOUNT=''
+SFS_PART="${PUPSFS%%,*}"
+SFS_MP="$(grep -m1 "^/dev/$SFS_PART" /proc/mounts)"
+if [ "$SFS_MP" ]; then
+	SFS_MP="${SFS_MP#* }"; SFS_MP="${SFS_MP%% *}"
+else
+	SPART_TYPE="${PUPSFS#*,}"; SPART_TYPE="${SPART_TYPE%,*}" 
+	if [ "$SPART_TYPE" ]; then
+		SFS_MP="/mnt/$SFS_PART"
+		[ -d "$SFS_MP" ] || mkdir -p $SFS_MP
+		mount -t $SPART_TYPE -o noatime /dev/$SFS_PART $SFS_MP
+		if [ $? -eq 0 ]; then
+			DID_MOUNT='yes'
+		else
+			SFS_MP=''
+		fi
+	fi
+fi
+if [ "$SFS_MP" = "" ]; then
+	$YAD_EXE --window-icon="$ICON_FILE" --center --borders=6 --title "$MAIN_TITLE" --image="$ERR_ICON" --button=gtk-ok:1 \
+		--text "\"$SFS_PART\" could not be mounted"
+	exit 1
+fi
+SFS_REL="${PUPSFS##*,}"; SFS_REL="${SFS_REL%/*}"
+
+echo "SFS_PART='$SFS_PART'" > "$CONF_FILE"
+echo "SFS_MP='$SFS_MP'" >> "$CONF_FILE"
+echo "SFS_REL='$SFS_REL'" >> "$CONF_FILE"
+echo "DID_MOUNT='$DID_MOUNT'" >> "$CONF_FILE"
+
+bootspecs2tmpbs -q
+
+exec "$EXE_DIR/extra_sfs_main"
+
+exit
