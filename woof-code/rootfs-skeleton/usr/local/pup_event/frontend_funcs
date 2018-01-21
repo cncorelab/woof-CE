@@ -316,7 +316,7 @@ free_initrd_func() { #UniPup, runs entirely in initramfs.
 free_func() { #called every 4 seconds.
  case $PUPMODE in
   6|12)
-   pup_rw="$(stat -c %m $(readlink -f /initrd/pup_rw))" #get mountpoint regardless of filetype
+   pup_rw="$(stat -Lc %m /initrd/pup_rw)" #get mountpoint regardless of filetype
    SIZEFREEM=`df -m | grep " ${pup_rw}$" | tr -s ' ' | cut -f 4 -d ' '`
   ;;
   *)
@@ -341,8 +341,8 @@ free_func() { #called every 4 seconds.
 
 free_flash_func() { #PUPMODE 3,7,13. called every 4 seconds.
  WARNMSG=""
- pup_ro1="$(stat -c %m $(readlink -f /initrd/pup_ro1))" #get mountpoint regardless of filetype
- pup_rw="$(stat -c %m $(readlink -f /initrd/pup_rw))" #get mountpoint regardless of filetype
+ pup_ro1="$(stat -Lc %m /initrd${SAVE_LAYER})" #get mountpoint regardless of filetype
+ pup_rw="$(stat -Lc %m /initrd/pup_rw)" #get mountpoint regardless of filetype
  SIZEFREEM=`df -m | grep " ${pup_ro1}$" | tr -s ' ' | cut -f 4 -d ' '`
  SIZETMPM=`df -m | grep " ${pup_rw}$" | tr -s ' ' | cut -f 4 -d ' '`
  [ -s /tmp/pup_event_sizefreem ] && read -r PREVSIZEFREEM < /tmp/pup_event_sizefreem
