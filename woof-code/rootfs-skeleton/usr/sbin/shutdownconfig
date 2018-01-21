@@ -52,6 +52,11 @@ echo -n "" > /tmp/shutdownconfig_results
 . /etc/rc.d/PUPSTATE
 . /etc/DISTRO_SPECS
 
+if [ "$PUNIONFS" = "overlay" ];then
+ echo "PUPMODE=21" > /tmp/shutdownconfig_results
+ exit
+fi
+
 #puppy.sfs is in a subdirectory, default to saving in it...
 PUPSFSFILE="`echo "$PUPSFS" | cut -f 3 -d ','`"
 PSUBDIR="`dirname "$PUPSFSFILE"`"
