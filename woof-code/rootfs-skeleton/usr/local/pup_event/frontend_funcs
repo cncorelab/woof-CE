@@ -315,7 +315,7 @@ free_initrd_func() { #UniPup, runs entirely in initramfs.
 
 free_func() { #called every 4 seconds.
  case $PUPMODE in
-  6|12)
+  6|12|21|93)
    pup_rw="$(stat -Lc %m /initrd/pup_rw)" #get mountpoint regardless of filetype
    SIZEFREEM=`df -m | grep " ${pup_rw}$" | tr -s ' ' | cut -f 4 -d ' '`
   ;;
