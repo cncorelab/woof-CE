@@ -217,7 +217,7 @@ check_total_size () {
    case $PUPMODE in
 	 2) AVAILABLE=$(df -m | grep / | head -n 1 | awk '{print $4}');;
 	 #fix following to work with symbolic links
-	 5|6) AVAILABLE=$(df -m | grep "$(stat -Lc %m /initrd/pup_rw)$" | awk '{print $4}');;
+	 5|6|21|93) AVAILABLE=$(df -m | grep "$(stat -Lc %m /initrd/pup_rw)$" | awk '{print $4}');;
 	 7|12|13) AVAILABLE=$(df -m | grep "$(stat -Lc %m /initrd${SAVE_LAYER})$" | awk '{print $4}');;
    esac
    if [ ! "$AVAILABLE" ]; then
